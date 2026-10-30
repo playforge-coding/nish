@@ -269,10 +269,57 @@ proc builtinTakesLine(name, args: string, r: Resolver): bool =
   else:
     false
 
-proc isCommandLine*(line: string, r: Resolver): bool =
-  let rest = line.strip(trailing = false)
+iterator unquoted(s: string): tuple[i: int, depth: int] =
+  ## Positions outside quotes, with the bracket depth at each.
+  var quote = ' '
+  var depth = 0
+  var i = 0
+  while i < s.len:
+    let c = s[i]
+    if quote != ' ':
+      if c == quote:
+        quote = ' '
+      elif c == '\\' and quote == '"':
+        inc i
+    elif c in {'\'', '"'}:
+      quote = c
+    else:
+      if c in {'(', '[', '{'}:
+        inc depth
+      elif c in {')', ']', '}'}:
+        dec depth
+      yield (i, depth)
+    inc i
+
+proc hasShellOperator(s: string): bool =
+  ## `&&`, `||`, `>>`, `>&` and `2>` are never Nim, so a line holding one
+  ## outside quotes is a command whatever its first word is.
+  for (i, _) in unquoted(s):
+    if s[i] in {'&', '|', '>'} and i + 1 < s.len and s[i + 1] in {'&', '|', '>'} and
+        s[i .. i + 1] in ["&&", "||", ">>", ">&"]:
+      return true
+    if s[i] in Digits and i + 1 < s.len and s[i + 1] == '>' and
+        (i == 0 or s[i - 1] in Whitespace):
+      return true
+  false
+
+proc splitStatements*(line: string): seq[string] =
+  ## Splits at `;` outside quotes and brackets, which separates statements in
+  ## Nim as well as commands in a shell, so each part can be either.
+  result = @[]
+  var start = 0
+  for (i, depth) in unquoted(line):
+    if line[i] == ';' and depth == 0:
+      result.add line[start ..< i]
+      start = i + 1
+  result.add line[start .. ^1]
+
+proc isCommandPart(part: string, r: Resolver): bool =
+  let rest = part.strip(trailing = false)
   if rest.len == 0 or rest[0] == '#':
     return false
+  if hasShellOperator(rest):
+    return true
   let word = rest[0 ..< skipWhile(rest, AllChars - Whitespace, 0)]
   if '/' in word:
     return r.isProgram(word)
@@ -291,6 +338,12 @@ proc isCommandLine*(line: string, r: Resolver): bool =
       (next + 1 == rest.len or rest[next + 1] != '='):
     return false
   ident == word and r.isProgram(ident)
+
+proc isCommandLine*(line: string, r: Resolver): bool =
+  ## Whether the line starts with a command. A leading `!` makes the whole
+  ## line one; otherwise the part before the first `;` decides.
+  let rest = line.strip(trailing = false)
+  (rest.len > 0 and rest[0] == '!') or isCommandPart(splitStatements(rest)[0], r)
 
 proc extractSplices*(line: string): tuple[line: string, exprs: seq[string]] =
   ## Replaces each `@(expr)` outside single quotes with `splice` and returns
@@ -350,25 +403,38 @@ proc nimCall(name, line: string, exprs: seq[string]): string =
     result.add ", " & e
   result.add ")"
 
-proc translateLine*(line: string, r: Resolver): string =
-  if not isCommandLine(line, r):
-    return line
-  let rest = line.strip(trailing = false)
-  let indent = line[0 ..< line.len - rest.len]
+proc translatePart(part: string, r: Resolver): string =
+  if not isCommandPart(part, r):
+    return part
+  let rest = part.strip
   let ident = rest[0 ..< skipWhile(rest, IdentChars, 0)]
   let (cmd, exprs) = extractSplices(rest)
   case ident
   of "cd":
     let args = cmd[ident.len .. ^1].strip
     if args.len == 0:
-      indent & "cd(getEnv(\"HOME\"))"
+      "cd(getEnv(\"HOME\"))"
     else:
-      indent & "cd(" & nimCall("word", args, exprs) & ")"
+      "cd(" & nimCall("word", args, exprs) & ")"
   of "exit":
     let args = cmd[ident.len .. ^1].strip
-    indent & "quit(" & (if args.len == 0: "lastStatus" else: args) & ")"
+    "quit(" & (if args.len == 0: "lastStatus" else: args) & ")"
   else:
-    indent & nimCall("run", cmd, exprs)
+    nimCall("run", cmd, exprs)
+
+proc translateLine*(line: string, r: Resolver): string =
+  let rest = line.strip(trailing = false)
+  let indent = line[0 ..< line.len - rest.len]
+  if rest.len > 0 and rest[0] == '!':
+    let (cmd, exprs) = extractSplices(rest[1 .. ^1].strip)
+    return indent & nimCall("run", cmd, exprs)
+  let parts = splitStatements(rest)
+  if parts.len == 1:
+    return indent & translatePart(rest, r)
+  var translated: seq[string] = @[]
+  for part in parts:
+    translated.add translatePart(part, r).strip
+  indent & translated.join("; ")
 
 proc translate*(code: string, r: Resolver): string =
   ## Rewrites every command line in `code`, leaving lines inside triple

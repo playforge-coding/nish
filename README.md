@@ -23,7 +23,8 @@ nish> cd /tmp
 - Command lines have shell syntax: pipes, `>`, `>>`, `<`, `2>&1`, `&&`, `||` and `;`, with globs, `~` and `$VAR` expanded in unquoted words.
 - `@(d)` puts the value of the Nim expression `d` into a command. A sequence becomes one argument per element.
 - `sh"..."` runs a command line and returns its output as a string; `lastStatus` holds the exit status of the last command.
-- `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim. Use `printf` or `run("echo ...")` for the program.
+- `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim. Three things override that: a line containing `&&`, `||`, `>>` or `2>` is always a command, since those are never Nim; a leading `!` makes the whole line a command (`!echo x | wc -l`); and `run"echo x | wc -l"` is plain Nim.
+- `;` separates statements, each of which can be Nim or a command: `ls; echo "done"`.
 - Commands work anywhere a statement does, including inside loops and procs.
 - The NimScript API that `.nims` files have (`cd`, `getEnv`, `listFiles`, `exec` and so on) is built in. `cd` and `exit` also work as commands.
 

@@ -55,11 +55,22 @@ test "splices":
   check s.eval("doAssert words(\"\\0\", newSeq[string]()).len == 0")
   check s.eval("doAssert sh(\"printf %s \\0\") == \"\"") # too few values
 
+test "lines that are commands despite their first word":
+  check s.eval("true && printf and > @(tmp)/and.txt")
+  check s.eval("doAssert sh(\"cat \" & tmp & \"/and.txt\") == \"and\"")
+  check s.eval("!echo hi | tr h j > @(tmp)/bang.txt")
+  check s.eval("doAssert sh(\"cat \" & tmp & \"/bang.txt\") == \"ji\"")
+  check s.eval("var seen = 0")
+  check s.eval("ls @(tmp) > /dev/null; seen += 1; ls @(tmp) > /dev/null")
+  check s.eval("doAssert seen == 1 and lastStatus == 0")
+
 test "command lines see Nim symbols":
   check s.isNimSymbol("answer")
   check s.isNimSymbol("echo")
   check not s.isNimSymbol("ls")
-  check s.eval("doAssert sh(\"ls \" & tmp) == \"a.txt\\nb.txt\\nout.txt\"")
+  check s.eval(
+    "doAssert sh(\"ls \" & tmp & \"/[ab].txt | wc -l | tr -d ' '\") == \"2\""
+  )
 
 test "the cd builtin":
   let here = getCurrentDir()

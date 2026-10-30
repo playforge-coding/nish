@@ -74,6 +74,24 @@ suite "isCommandLine":
     check not isCommandLine("nosuchprogram x", r)
     check not isCommandLine("# ls", r)
 
+  test "shell-only operators make a command of any line":
+    check isCommandLine("true && ls", r)
+    check isCommandLine("echo a || echo b", r)
+    check isCommandLine("echo x >> f", r)
+    check isCommandLine("echo x 2>&1", r)
+    check isCommandLine("echo x 2> f", r)
+    check not isCommandLine("echo \"a && b\"", r)
+    check not isCommandLine("echo x > f", r) # `>` is Nim too
+    check not isCommandLine("echo 2 > 1", r)
+
+  test "a leading ! makes the whole line a command":
+    check isCommandLine("!echo x | wc -l", r)
+    check isCommandLine("  !true", r)
+
+  test "the part before the first ; decides":
+    check isCommandLine("ls; echo x", r)
+    check not isCommandLine("echo x; ls", r)
+
   test "builtins":
     check isCommandLine("cd", r)
     check isCommandLine("cd /tmp", r)
@@ -102,6 +120,17 @@ suite "translate":
     check translate("cd ~/x @(d)", r) == "cd(word(\"~/x \\x00\", d))"
     check translate("exit", r) == "quit(lastStatus)"
     check translate("exit 3", r) == "quit(3)"
+
+  test "each part between semicolons is classified on its own":
+    check translate("ls; echo x", r) == "run(\"ls\"); echo x"
+    check translate("  ls -a; ls", r) == "  run(\"ls -a\"); run(\"ls\")"
+    check translate("echo \"a; b\"; ls", r) == "echo \"a; b\"; run(\"ls\")"
+    check translate("proc f(a: int; b: int) = ls", r) == "proc f(a: int; b: int) = ls"
+    check translate("true && ls; echo x", r) == "run(\"true && ls\"); echo x"
+
+  test "a leading ! keeps the whole line":
+    check translate("!echo x | wc -l; echo y", r) == "run(\"echo x | wc -l; echo y\")"
+    check translate("  ! ls @(d)", r) == "  run(\"ls \\x00\", d)"
 
   test "leaves triple quoted strings alone":
     let code = "let s = \"\"\"\nls -la\n\"\"\"\nls"
