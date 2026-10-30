@@ -1,0 +1,4 @@
+[tools]
+"github:arnetheduck/nph" = "0.7.0"
+# First register it with `mise plugin install nim https://github.com/elijahr/vfox-nim`
+nim = "2.4.0"

@@ -1,0 +1,4 @@
+/nish
+/tests/*
+!/tests/*.nim
+/nimbledeps/
