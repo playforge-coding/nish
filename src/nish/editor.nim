@@ -422,6 +422,10 @@ proc wordEnd(e: Editor): int =
     inc result
 
 proc deleteRange(e: Editor, a, b: int) =
+  ## Removes `a ..< b`, keeping it for Ctrl-Y. `strutils.delete` raises on
+  ## an empty range, so nothing to delete means nothing to do.
+  if a >= b:
+    return
   e.killed = e.text[a ..< b]
   e.text.delete(a ..< b)
   e.cursor = a
