@@ -116,6 +116,32 @@ suite "isCommandLine":
     check not isCommandLine("fg x", r)
     check not isCommandLine("jobs.len", r)
 
+suite "unknownCommand":
+  test "command-shaped lines with no program":
+    check unknownCommand("nosuch", r) == "nosuch"
+    check unknownCommand("nosuch -la src", r) == "nosuch"
+    check unknownCommand("  no-such-thing --flag", r) == "no-such-thing"
+    check unknownCommand("nosuch ~/x", r) == "nosuch"
+    check unknownCommand("nosuch \"quoted\"", r) == "nosuch"
+    check unknownCommand("nosuch @(x)", r) == "nosuch"
+
+  test "Nim shapes are left to the compiler":
+    check unknownCommand("total += i", r) == ""
+    check unknownCommand("x - 1", r) == ""
+    check unknownCommand("x = 3", r) == ""
+    check unknownCommand("f(1)", r) == ""
+    check unknownCommand("x.len", r) == ""
+    check unknownCommand("echo x", r) == "" # a symbol
+    check unknownCommand("ls -la", r) == "" # a program
+    check unknownCommand("cd /tmp", r) == "" # a builtin
+    check unknownCommand("for x in y:", r) == ""
+    check unknownCommand("# nosuch", r) == ""
+    check unknownCommand("", r) == ""
+
+  test "whole inputs":
+    check findUnknownCommand("for f in files:\n  nosuch @(f)", r) == "nosuch"
+    check findUnknownCommand("let s = \"\"\"\nnosuch\n\"\"\"", r) == ""
+
 suite "translate":
   test "extractSplices":
     check extractSplices("""printf "@(a)" '@(b)' @(f(1, ")"))""") ==

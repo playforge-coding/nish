@@ -21,6 +21,11 @@ type Session* = ref object
   ctx: PContext
   backend: PPassContext
   apiDir: string ## where `nishapi.nim` was unpacked
+  sourceName*: string ## shown in messages instead of `stdin`; "" at the prompt
+  inputLines: int ## of the input being evaluated, for message positions
+  onMessage*: proc(line: string) ## where compiler messages go; stderr by default
+  errorShown: bool ## an error was already shown for this input
+  suppressing: bool ## the current message is a follow-up error, dropped
 
 proc errorCount(s: Session): int =
   s.graph.config.errorCounter
@@ -95,7 +100,53 @@ proc resolver*(s: Session): Resolver =
 
 proc eval*(s: Session, input: string, line = 1): bool =
   ## Evaluates shell input: Nim with command lines mixed in.
-  s.evalNim(translate(input, s.resolver), line)
+  let r = s.resolver
+  s.inputLines = input.countLines
+  s.errorShown = false
+  s.suppressing = false
+  let missing = findUnknownCommand(input, r)
+  if missing.len > 0:
+    stderr.writeLine "nish: ", missing, ": command not found"
+    lastStatus = 127
+    discard s.evalNim("lastStatus = 127")
+    return false
+  s.evalNim(translate(input, r), line)
+
+proc formatMessage(s: Session, msg: string): string =
+  ## Compiler messages start with `stdin(line, col) `. At the prompt that
+  ## says nothing useful, so it goes, or becomes `line N: ` for an input of
+  ## several lines; in a script it names the script.
+  if not msg.startsWith("stdin("):
+    return msg
+  let close = msg.find(") ")
+  if close < 0:
+    return msg
+  let position = msg[6 ..< close]
+  let rest = msg[close + 2 .. ^1]
+  if s.sourceName.len > 0:
+    s.sourceName & "(" & position & ") " & rest
+  elif s.inputLines > 1:
+    "line " & position[0 ..< position.find(',')] & ": " & rest
+  else:
+    rest
+
+proc deliver(s: Session, msg: string) =
+  ## Passes a compiler message line on, except follow-up errors. The compiler
+  ## goes on after an error so the session survives it, and reports every
+  ## consequence of the first mistake too; only the first error and its
+  ## detail lines are shown.
+  # While the compiler tries overload candidates it turns its outputs off
+  # but still calls the hook with the errors it runs into there.
+  if s.graph.config.m.errorOutputs == {}:
+    return
+  if msg.startsWith("stdin("):
+    if " Error: " in msg:
+      s.suppressing = s.errorShown
+      s.errorShown = true
+    else:
+      s.suppressing = false
+  if not s.suppressing:
+    s.onMessage(s.formatMessage(msg))
 
 # Calling into the VM
 
@@ -112,6 +163,8 @@ proc callHook*(s: Session, name: string, args: varargs[PNode]): PNode =
   let sym = s.apiSym(name)
   if sym == nil:
     return nil
+  s.errorShown = false
+  s.suppressing = false
   let before = s.errorCount
   let mark = s.vm.mem.stackMark
   try:
@@ -203,6 +256,12 @@ proc newSession*(): Session =
   let vm = setupVM(module, cache, "nish", graph, idgen)
   vm.features.incl allowInfiniteLoops
   let session = Session(graph: graph, module: module, apiDir: api)
+  session.onMessage = proc(line: string) =
+    stderr.writeLine line
+  conf.writelnHook = proc(output: string) {.gcsafe.} =
+    {.cast(gcsafe).}: # single-threaded; `onMessage` is a plain closure
+      for line in output.strip(leading = false, chars = {'\n'}).splitLines:
+        session.deliver(line)
   registerHostProcs(
     vm,
     getPackageName(conf, api / "nishapi.nim"),

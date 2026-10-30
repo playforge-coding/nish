@@ -82,6 +82,7 @@ proc main() =
   var timing = false
   var noInit = false
   var script, code = ""
+  var haveCode = false
   var interactive = true
   let args = commandLineParams()
   var i = 0
@@ -98,6 +99,7 @@ proc main() =
         quit(usage, QuitFailure)
       inc i
       code = args[i]
+      haveCode = true
       interactive = false
     else:
       script = args[i]
@@ -113,11 +115,14 @@ proc main() =
   if interactive:
     enableJobControl()
     if not noInit and fileExists(initFile()):
+      s.sourceName = initFile()
       discard s.runScript(readFile(initFile()).splitLines, stopOnError = false)
+      s.sourceName = ""
     s.interact()
   else:
+    s.sourceName = if haveCode: "" else: script
     var lines =
-      if code.len > 0:
+      if haveCode:
         code.splitLines
       else:
         readFile(script).splitLines

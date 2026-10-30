@@ -15,10 +15,42 @@ test "state carries across inputs":
   check s.eval("var answer = 6 * 7")
   check s.eval("doAssert answer == 42")
 
+var messages: seq[string] = @[]
+s.onMessage = proc(line: string) =
+  messages.add line
+
 test "an error is reported and the session goes on":
-  check not s.eval("undefinedThing")
+  check not s.eval("undefinedThing()")
+  check messages == @["Error: undeclared identifier: 'undefinedThing'"]
+  messages = @[]
   check not s.eval("doAssert answer == 41")
+  check messages[^1].endsWith("[AssertionDefect]")
   check s.eval("answer += 1\ndoAssert answer == 43")
+
+test "message positions":
+  # A fresh name each time: the compiler remembers a failed one as declared.
+  messages = @[]
+  check not s.eval("let ok = 1\nnope1(ok)")
+  check messages == @["line 2: Error: undeclared identifier: 'nope1'"]
+  s.sourceName = "demo.nims"
+  messages = @[]
+  check not s.eval("nope2(1)", line = 7)
+  check messages == @["demo.nims(7, 1) Error: undeclared identifier: 'nope2'"]
+  s.sourceName = ""
+
+test "detail lines of the first error are kept":
+  messages = @[]
+  check not s.eval("let n: int = \"text\"")
+  check messages[0] ==
+    "Error: type mismatch: got 'string' for '\"text\"' but expected 'int'"
+  check messages.len == 1
+
+test "command not found":
+  messages = @[]
+  check not s.eval("nosuchprogram -v")
+  check not s.eval("no-such-program")
+  check messages.len == 0 # nish reports it itself, on stderr
+  check s.eval("doAssert lastStatus == 127")
 
 test "commands run through the host":
   check s.eval("doAssert run(\"true\") == 0")

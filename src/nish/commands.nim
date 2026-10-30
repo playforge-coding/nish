@@ -358,6 +358,45 @@ proc isCommandLine*(line: string, r: Resolver): bool =
   let rest = line.strip(trailing = false)
   (rest.len > 0 and rest[0] == '!') or isCommandPart(splitStatements(rest)[0], r)
 
+proc unknownCommand*(line: string, r: Resolver): string =
+  ## The first word of a line that is shaped like a command but names no
+  ## program, or "". Such a line would otherwise get the compiler's
+  ## "undeclared identifier", when "command not found" is what happened.
+  ## The shape: a bare word, possibly with hyphens, that is no Nim symbol,
+  ## followed by nothing or by something that starts a shell argument rather
+  ## than a Nim operator.
+  let rest = line.strip
+  if rest.len == 0 or rest[0] notin IdentStartChars:
+    return ""
+  let word = rest[0 ..< skipWhile(rest, IdentChars + {'-'}, 0)]
+  if word in nimKeywords or word in builtins or r.isNimSymbol(word) or r.isProgram(word):
+    return ""
+  let args = rest[word.len .. ^1]
+  if args.len == 0:
+    return word
+  if args[0] notin Whitespace:
+    return ""
+  let a = args.strip
+  if a.len == 0:
+    return word
+  let argStart =
+    a[0] in IdentChars or a[0] in {'/', '.', '~', '$', '"', '\'', '@'} or
+    (a[0] == '-' and a.len > 1 and a[1] in Letters + {'-'})
+  if argStart: word else: ""
+
+proc findUnknownCommand*(code: string, r: Resolver): string =
+  ## `unknownCommand` over every line of an input outside triple quoted
+  ## strings.
+  var inTriple = false
+  for line in code.splitLines:
+    if not inTriple:
+      let word = unknownCommand(line, r)
+      if word.len > 0:
+        return word
+    if line.count("\"\"\"") mod 2 == 1:
+      inTriple = not inTriple
+  ""
+
 proc extractSplices*(line: string): tuple[line: string, exprs: seq[string]] =
   ## Replaces each `@(expr)` outside single quotes with `splice` and returns
   ## the expressions in order.

@@ -3,7 +3,7 @@
 A terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM.
 
 > [!WARNING]
-> nish is an early spike. Friendly error messages are not there yet.
+> nish is young. It has the pieces a daily shell needs, but expect rough edges.
 
 ## What it looks like
 
