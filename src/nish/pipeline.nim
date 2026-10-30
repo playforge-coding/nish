@@ -4,13 +4,50 @@
 ## pipes between the commands of a pipeline and the shell's own terminal for
 ## everything else.
 
-import std/[os, posix, strutils]
+import std/[os, posix, strutils, tables]
 import ./[commands, jobs]
 
 type ShellError* = object of CatchableError
 
+var aliases* = initTable[string, string]() ## name to the command line it stands for
+
 proc fail(msg: string) =
   raise newException(ShellError, msg)
+
+# Aliases
+
+proc aliasName(cmd: Command): string =
+  ## The alias a command starts with, or "".
+  if cmd.words.len > 0 and cmd.words[0].len == 1 and cmd.words[0][0].quote == qNone and
+      aliases.hasKey(cmd.words[0][0].text):
+    cmd.words[0][0].text
+  else:
+    ""
+
+proc resolveAliases(cmd: Command): Command =
+  ## Replaces a first word that names an alias with the alias's words, again
+  ## if the result starts with another alias. `alias "ls", "ls -G"` stops
+  ## after one round.
+  result = cmd
+  var rounds = 0
+  while rounds < 10:
+    let name = result.aliasName
+    if name.len == 0:
+      return
+    let steps =
+      try:
+        parseCommandLine(aliases[name])
+      except ValueError as e:
+        fail "alias " & name & ": " & e.msg
+        @[]
+    if steps.len != 1 or steps[0].pipeline.len != 1:
+      fail "alias " & name & " must be a single command"
+    let target = steps[0].pipeline[0]
+    result.words = target.words & result.words[1 .. ^1]
+    result.redirects = target.redirects & result.redirects
+    inc rounds
+    if result.aliasName == name:
+      return
 
 # Expansion
 
@@ -168,7 +205,8 @@ proc runPipeline(
   ## Starts every command as one job, then waits for it unless it runs in
   ## the background. The status is the last command's.
   var cmds: seq[Expanded] = @[]
-  for cmd in pipeline:
+  for original in pipeline:
+    let cmd = resolveAliases(original)
     var e = Expanded()
     for w in cmd.words:
       e.argv.add expandWord(w, splices, next)
@@ -255,5 +293,5 @@ proc expandLine*(line: string, splices: seq[seq[string]]): seq[string] =
     fail "expected a single command without pipes or redirects: " & line
   result = @[]
   var next = 0
-  for w in steps[0].pipeline[0].words:
+  for w in resolveAliases(steps[0].pipeline[0]).words:
     result.add expandWord(w, splices, next)

@@ -3,7 +3,7 @@
 A terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM.
 
 > [!WARNING]
-> nish is an early spike. A startup file, completion and friendly error messages are not there yet.
+> nish is an early spike. Friendly error messages and a line editor of its own (for key bindings and colored prompts) are not there yet.
 
 ## What it looks like
 
@@ -35,6 +35,29 @@ Scripts work the same way:
 nish script.nims
 nish -c 'for i in 1..3: echo i'
 ```
+
+## Customizing
+
+nish runs `~/.config/nish/init.nims` when it starts. It's NimScript like everything else, and it configures the shell by setting hooks:
+
+```nim
+import std/strutils
+
+alias "ll", "ls -la"
+alias "gs", "git status"
+
+prompt = proc(): string =
+  let branch = sh"git branch --show-current 2> /dev/null"
+  tildePath(getCurrentDir()) & (if branch.len > 0: " (" & branch & ")" else: "") & "> "
+
+onDirChange.add proc(dir: string) =
+  ls
+
+completers.add proc(line, word: string): seq[string] =
+  if line.startsWith("git "): @["status", "commit", "push"] else: @[]
+```
+
+The hooks are `prompt`, `continuationPrompt`, `onPreCommand`, `onCommandDone`, `onDirChange` and `completers`. A plugin is a Nim module in `~/.config/nish/plugins/` (directly or one directory down, so a cloned repository works as it is) that you `import` from `init.nims`. Tab completes programs, Nim symbols in scope, builtins and file names, plus whatever the completers add. History is kept in the nish data directory.
 
 ## How it works
 

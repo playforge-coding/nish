@@ -1,4 +1,4 @@
-import std/[os, unittest]
+import std/[os, strutils, unittest]
 import nish/session
 
 let s = newSession()
@@ -71,6 +71,42 @@ test "background jobs":
   check s.eval("doAssert fg(2) == 1")
   check s.eval("doAssert fg(1) == 0")
   check s.eval("doAssert fg() == 1") # no job left
+
+test "aliases":
+  check s.eval("alias \"hello\", \"printf hi\"")
+  check s.eval("doAssert sh\"hello\" == \"hi\"")
+  check s.eval("hello > @(tmp)/alias.txt") # an alias name is a command
+  check s.eval("doAssert sh(\"cat \" & tmp & \"/alias.txt\") == \"hi\"")
+  check s.eval("alias \"ls\", \"ls -d\"") # refers to itself
+  check s.eval("doAssert sh(\"ls \" & tmp) == tmp")
+  check s.eval("doAssert words(\"hello there\") == @[\"printf\", \"hi\", \"there\"]")
+
+test "hooks":
+  check s.hookString("nishPrompt", "").endsWith("> ")
+  check s.eval("prompt = proc(): string = \"custom> \"")
+  check s.hookString("nishPrompt", "") == "custom> "
+  check s.eval("var statuses: seq[int] = @[]")
+  check s.eval(
+    "onCommandDone.add proc(line: string, status: int) = statuses.add status"
+  )
+  s.runHook("nishCommandDone", strNode("x"), intNode(7))
+  check s.eval("doAssert statuses == @[7]")
+  # A failing hook falls back and doesn't take the session down.
+  check s.eval("prompt = proc(): string = raise newException(ValueError, \"boom\")")
+  check s.hookString("nishPrompt", "fallback> ") == "fallback> "
+  check s.eval("prompt = proc(): string = \"ok> \"")
+  check s.hookString("nishPrompt", "") == "ok> "
+
+test "completion":
+  check "echo" in s.complete("ec")
+  check "ls" in s.complete("l")
+  check "cd" in s.complete("c")
+  check ("cat " & tmp & "/a.txt") in s.complete("cat " & tmp & "/a")
+  check s.eval(
+    "completers.add proc(line, word: string): seq[string] = @[\"zzz\" & word]"
+  )
+  check "zzzq" in s.complete("q")
+  check ("x zzzq") in s.complete("x q")
 
 test "command lines see Nim symbols":
   check s.isNimSymbol("answer")
