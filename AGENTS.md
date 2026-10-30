@@ -8,7 +8,8 @@ Input is Nim first. A line is a command only when its first word is not a Nim ke
 
 Modules in `src/`:
 
-- `nish.nim`: the entry point. Parses arguments, then runs the prompt (linenoise through `std/linenoise`) or a script.
+- `nish.nim`: the entry point. Parses arguments, then runs the prompt or a script.
+- `nish/editor.nim`: the line editor. Raw mode through `std/termios`, switched with `TCSADRAIN` and never `TCSAFLUSH` (linenoise flushed, which lost everything after the first line of a paste). Decodes keys into names like "ctrl-t" and "alt-f", reads bracketed pastes as one key, and redraws the whole multi-line input each time, tracking the cursor's row so it can get back to the top, with full-width lines moved past explicitly so its row count matches the terminal's. Enter accepts when `input.needsMoreInput` says the input is complete. Key bindings from Nim run through `nishKeyPressed`, and the host exposes the active editor to them.
 - `nish/session.nim`: the embedded VM. One long-lived module whose scope carries over between inputs. It drives parsing, `semWithPContext` and `interpreterCode` itself instead of calling `processPipelineModule`, because that raises out on the first error and loses the scope. Defines `nimconfig`, so `system/nimscript` (`cd`, `getEnv`, `exec`, `listFiles` and the rest of the `.nims` API) is there, implemented by the compiler's `setupVM`.
 - `nish/commands.nim`: decides which lines are commands, rewrites them, and parses command lines into pipelines (`parseCommandLine`). Pure: it asks a `Resolver` about symbols and programs and never touches the file system, so tests need no VM.
 - `nish/input.nim`: groups lines into chunks the VM evaluates on its own. At the prompt it follows the compiler REPL's rules (a blank line ends a block); for scripts it looks ahead and splits at top-level statements.
@@ -30,7 +31,7 @@ Things about the compiler API that are easy to get wrong:
 - Keep the package manifest in `nish.nimble` at the root, and put build and test commands in it as Nimble tasks so `nimble build` and `nimble test` are the only commands anyone needs to remember. Pin dependencies in `nimble.lock` (`nimble lock`) and commit it.
 - Tests live in `tests/`, one `t*.nim` file per area, using `std/unittest`. `nimble test` runs them all. Add a test with every behavior change.
 - Run `nim check` on a file for fast type errors without a full build.
-- Check behavior with the real binary: `./nish -c '<code>'` runs code and exits with 1 on the first error, and `--timing` prints how long the VM took to start. Keep an eye on that number, since every shell start pays it. To test the prompt without a terminal, drive it through a pseudo-terminal and answer linenoise's cursor position query (`ESC[6n`) with something like `ESC[1;7R`, or it swallows the input.
+- Check behavior with the real binary: `./nish -c '<code>'` runs code and exits with 1 on the first error, and `--timing` prints how long the VM took to start. Keep an eye on that number, since every shell start pays it. To test the prompt without a terminal, drive it through a pseudo-terminal (Python's `pty` module works) and set its window size, since the editor wraps by the terminal width.
 - Compiler settings that apply to the whole project go in `config.nims` at the root, not in flags scattered across scripts.
 
 ## Searching the Codebase

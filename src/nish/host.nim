@@ -2,7 +2,7 @@
 
 import std/[os, sets, strutils, tables]
 import compiler/[ast, vm, vmdef]
-import ./[jobs, pipeline]
+import ./[editor, jobs, pipeline]
 
 var lastStatus* = 0 ## of the last command line run through the host
 
@@ -110,3 +110,18 @@ proc registerHostProcs*(
 
   callback "shellFiles":
     a.setResult(filesMatching(a.getString(0)))
+
+  # The editor being used right now, if a key binding is running.
+  callback "editorGetText":
+    a.setResult(if active != nil: active.text else: "")
+
+  callback "editorGetCursor":
+    a.setResult(BiggestInt(if active != nil: active.cursor else: 0))
+
+  callback "editorSetText":
+    if active != nil:
+      active.setText(a.getString(0), int a.getInt(1))
+
+  callback "editorInsert":
+    if active != nil:
+      active.insertText(a.getString(0))

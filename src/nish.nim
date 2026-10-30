@@ -1,7 +1,7 @@
 ## nish: a terminal shell whose language is NimScript.
 
-import std/[linenoise, monotimes, os, posix, strutils, times]
-import nish/[commands, host, input, jobs, session]
+import std/[monotimes, os, posix, strutils, times]
+import nish/[commands, editor, host, input, jobs, session]
 
 const usage = """
 Usage:
@@ -12,41 +12,11 @@ Options:
   --no-init            don't run ~/.config/nish/init.nims
   --timing             print how long the VM took to start"""
 
-var current: Session ## for linenoise's completion callback, which can't be a closure
-
 proc initFile(): string =
   getConfigDir() / "nish" / "init.nims"
 
 proc historyFile(): string =
   getDataDir() / "nish" / "history"
-
-proc completeLine(buf: cstring, completions: ptr Completions) {.cdecl.} =
-  # Called from C: an exception escaping here would crash the shell.
-  try:
-    for candidate in current.complete($buf):
-      addCompletion(completions, candidate.cstring)
-  except CatchableError as e:
-    stderr.writeLine "\nnish: completion failed: ", e.msg
-
-proc promptReader(s: Session): LineReader =
-  result = proc(continuation: bool, line: var string): bool =
-    let prompt =
-      if continuation:
-        s.hookString("nishContinuationPrompt", "  ... ")
-      else:
-        s.hookString("nishPrompt", "nish> ")
-    while true:
-      errno = 0 # linenoise only sets it for Ctrl-C, not for Ctrl-D
-      let buf = linenoise.readLine(prompt.cstring)
-      if buf != nil:
-        line = $buf
-        if line.len > 0:
-          historyAdd(buf)
-          discard historySave(historyFile().cstring)
-        linenoise.free(buf)
-        return true
-      if errno != EAGAIN: # EAGAIN means Ctrl-C, which only clears the line
-        return false
 
 proc isCommand(s: Session): proc(line: string): bool =
   let r = s.resolver
@@ -59,13 +29,25 @@ proc currentDir(fallback: string): string =
   except OSError:
     fallback
 
+proc newEditor(s: Session): Editor =
+  result = newEditor(historyFile())
+  let isCommand = s.isCommand
+  result.needsMore = proc(text: string): bool =
+    needsMoreInput(text, isCommand)
+  result.complete = proc(line: string): seq[string] =
+    s.complete(line)
+  result.userKey = proc(key: string): bool =
+    s.hookBool("nishKeyPressed", strNode(key))
+
+proc stdinReader(): LineReader =
+  ## Lines from a pipe or file on standard input, with no editing.
+  result = proc(continuation: bool, line: var string): bool =
+    stdin.readLine(line)
+
 proc interact(s: Session) =
-  current = s
-  setCompletionCallback(completeLine)
-  discard historySetMaxLen(10000)
-  createDir(historyFile().parentDir)
-  discard historyLoad(historyFile().cstring)
-  let read = s.promptReader
+  let interactive = isatty(0) != 0
+  let editor = if interactive: s.newEditor else: nil
+  let reader = stdinReader()
   var chunk = ""
   var dir = currentDir("")
   while true:
@@ -74,7 +56,13 @@ proc interact(s: Session) =
     if now != dir:
       dir = now
       s.runHook("nishDirChanged", strNode(now))
-    if not readChunk(read, s.isCommand, chunk):
+    if interactive:
+      let prompt = s.hookString("nishPrompt", "nish> ")
+      let continuation = s.hookString("nishContinuationPrompt", "  ... ")
+      if not editor.readInput(prompt, continuation, chunk):
+        break
+      editor.addHistory(chunk)
+    elif not readChunk(reader, s.isCommand, chunk):
       break
     s.runHook("nishPreCommand", strNode(chunk))
     discard s.eval(chunk)

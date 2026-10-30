@@ -97,6 +97,15 @@ test "hooks":
   check s.eval("prompt = proc(): string = \"ok> \"")
   check s.hookString("nishPrompt", "") == "ok> "
 
+test "key bindings":
+  check s.eval("var pressed: seq[string] = @[]")
+  check s.eval("bindKey \"ctrl-t\", proc() = pressed.add \"t\"")
+  check s.eval("bindKey \"ctrl-t\", proc() = pressed.add \"t2\"") # replaces
+  check s.eval("doAssert nishKeyPressed(\"ctrl-t\") and not nishKeyPressed(\"ctrl-q\")")
+  check s.eval("doAssert pressed == @[\"t2\"]")
+  check s.eval("doAssert editorText() == \"\" and editorCursor() == 0")
+    # no editor active
+
 test "completion":
   check "echo" in s.complete("ec")
   check "ls" in s.complete("l")

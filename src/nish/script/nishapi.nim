@@ -56,6 +56,28 @@ proc shellSymbols(prefix: string): seq[string] =
 proc shellFiles(prefix: string): seq[string] =
   discard "implemented by nish"
 
+proc editorGetText(): string =
+  discard "implemented by nish"
+
+proc editorGetCursor(): int =
+  discard "implemented by nish"
+
+proc editorSetText*(text: string, cursor: int) =
+  ## Replaces the input being edited. Only meaningful inside a key binding.
+  discard "implemented by nish"
+
+proc editorInsert*(s: string) =
+  ## Inserts at the cursor. Only meaningful inside a key binding.
+  discard "implemented by nish"
+
+proc editorText*(): string =
+  ## The input being edited. Only meaningful inside a key binding.
+  editorGetText()
+
+proc editorCursor*(): int =
+  ## The cursor's byte offset in `editorText()`.
+  editorGetCursor()
+
 # Running commands
 
 proc run*(line: string, splices: varargs[seq[string], toArgs]): int {.discardable.} =
@@ -152,7 +174,28 @@ var
   completers*: seq[Completer] = @[Completer(defaultCompleter)]
     ## All of these are asked on Tab; their answers are joined.
 
+var keyBindings*: seq[tuple[key: string, action: proc()]] = @[]
+  ## Set with `bindKey`. Key names are like "ctrl-t", "alt-x", "f5", "up",
+  ## "ctrl-right". Printable characters can't be bound.
+
+proc bindKey*(key: string, action: proc()) =
+  ## Runs `action` when `key` is pressed at the prompt, instead of what the
+  ## editor would do. The action works on the input through `editorText`,
+  ## `editorCursor`, `editorSetText` and `editorInsert`.
+  for i, binding in keyBindings:
+    if binding.key == key:
+      keyBindings[i].action = action
+      return
+  keyBindings.add (key, action)
+
 # Entry points nish calls
+
+proc nishKeyPressed*(key: string): bool =
+  for binding in keyBindings:
+    if binding.key == key:
+      binding.action()
+      return true
+  false
 
 proc nishPrompt*(): string =
   prompt()

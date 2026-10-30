@@ -129,6 +129,10 @@ proc hookString*(s: Session, name, fallback: string): string =
   let n = s.callHook(name)
   if n != nil and n.kind in {nkStrLit .. nkTripleStrLit}: n.strVal else: fallback
 
+proc hookBool*(s: Session, name: string, args: varargs[PNode]): bool =
+  let n = s.callHook(name, args)
+  n != nil and n.kind == nkIntLit and n.intVal != 0
+
 proc complete*(s: Session, line: string): seq[string] =
   ## Whole-line completions for `line`.
   result = @[]

@@ -163,6 +163,16 @@ suite "chunks":
     ]
     check splitChunks(lines, isCommand).mapIt(it.line) == @[1, 2, 8, 9]
 
+  test "the editor asks for more input by the same rules":
+    check needsMoreInput("for i in 0..2:", isCommand)
+    check needsMoreInput("for i in 0..2:\n  echo i", isCommand)
+    check not needsMoreInput("for i in 0..2:\n  echo i\n", isCommand)
+    check needsMoreInput("let x = 1 +", isCommand)
+    check needsMoreInput("let s = \"\"\"\nabc", isCommand)
+    check not needsMoreInput("let s = \"\"\"\nabc\n\"\"\"", isCommand)
+    check not needsMoreInput("ls *", isCommand)
+    check not needsMoreInput("echo 1", isCommand)
+
   test "the prompt reads until a blank line ends a block":
     var input = @["for i in 0..2:", "  echo i", "", "ls *"]
     let read: LineReader = proc(continuation: bool, line: var string): bool =

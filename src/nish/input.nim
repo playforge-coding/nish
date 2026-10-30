@@ -47,8 +47,9 @@ proc endsOpen(line: string): bool =
   false
 
 proc continues(line: string, inTriple: bool): bool =
-  ## At the prompt, an indented line also keeps the block open.
-  inTriple or (line.len > 0 and line[0] in Whitespace) or endsOpen(line)
+  ## At the prompt, an indented line also keeps the block open. A line of
+  ## only whitespace is a blank line, which ends it.
+  inTriple or (line.strip.len > 0 and line[0] in Whitespace) or endsOpen(line)
 
 proc isTopLevelCommand(
     line: string, inTriple: bool, isCommand: proc(line: string): bool
@@ -72,6 +73,16 @@ proc readChunk*(
     if isTopLevelCommand(line, inTriple, isCommand) or not continues(line, inTriple):
       return true
   chunk.len > 0
+
+proc needsMoreInput*(text: string, isCommand: proc(line: string): bool): bool =
+  ## The prompt rule for a whole input the editor holds: whether Enter should
+  ## add a line rather than accept it. The last line decides, as in
+  ## `readChunk`.
+  let lines = text.split('\n')
+  let inTriple = text.count("\"\"\"") mod 2 == 1
+  if lines.len == 1 and isTopLevelCommand(lines[0], inTriple, isCommand):
+    return false
+  continues(lines[^1], inTriple)
 
 proc startsBranch(line: string): bool =
   for word in branchWords:

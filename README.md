@@ -3,7 +3,7 @@
 A terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM.
 
 > [!WARNING]
-> nish is an early spike. Friendly error messages and a line editor of its own (for key bindings and colored prompts) are not there yet.
+> nish is an early spike. Friendly error messages are not there yet.
 
 ## What it looks like
 
@@ -58,6 +58,15 @@ completers.add proc(line, word: string): seq[string] =
 ```
 
 The hooks are `prompt`, `continuationPrompt`, `onPreCommand`, `onCommandDone`, `onDirChange` and `completers`. A plugin is a Nim module in `~/.config/nish/plugins/` (directly or one directory down, so a cloned repository works as it is) that you `import` from `init.nims`. Tab completes programs, Nim symbols in scope, builtins and file names, plus whatever the completers add. History is kept in the nish data directory.
+
+Prompts can use colors. Keys can be bound to Nim procs, which edit the input through `editorText`, `editorCursor`, `editorSetText` and `editorInsert`:
+
+```nim
+bindKey "ctrl-t", proc() =
+  editorSetText("time " & editorText(), editorCursor() + 5)
+```
+
+The editor itself handles multi-line input: Enter adds a line while a block is open and accepts when it's complete, Ctrl-J always adds a line, and a pasted block becomes one input. Ctrl-R searches the history, and the usual Emacs keys work.
 
 ## How it works
 
