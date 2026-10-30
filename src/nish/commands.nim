@@ -53,6 +53,7 @@ type
   Step* = object
     chain*: Chain ## how this pipeline depends on the one before it
     pipeline*: Pipeline
+    background*: bool ## ended with `&`
 
   CommandLine* = seq[Step]
 
@@ -81,6 +82,7 @@ type LineParser = object
   command: Command
   pipeline: Pipeline
   chain: Chain
+  background: bool
   line: CommandLine
 
 proc fail(msg: string) =
@@ -124,8 +126,9 @@ proc finishCommand(p: var LineParser, before: string) =
 proc finishPipeline(p: var LineParser, before: string, next: Chain) =
   p.finishCommand(before)
   if p.pipeline.len > 0:
-    p.line.add Step(chain: p.chain, pipeline: p.pipeline)
+    p.line.add Step(chain: p.chain, pipeline: p.pipeline, background: p.background)
     p.pipeline = @[]
+    p.background = false
   elif before.len > 0 and before != ";":
     fail "missing command before '" & before & "'"
   p.chain = next
@@ -215,7 +218,9 @@ proc parseCommandLine*(s: string): CommandLine =
         p.finishPipeline("&&", chAnd)
         inc p.i, 2
       else:
-        fail "background jobs ('&') are not supported yet"
+        p.background = true
+        p.finishPipeline("&", chAlways)
+        inc p.i
     of ';':
       p.finishPipeline(";", chAlways)
       inc p.i
@@ -241,7 +246,11 @@ proc countSplices*(pipeline: Pipeline): int =
 
 # Finding and rewriting command lines
 
-const builtins = ["cd", "exit"]
+const builtins = ["cd", "exit", "jobs", "fg", "bg"]
+
+proc jobId(args: string): string =
+  ## `fg 2` and `fg %2` both mean job 2.
+  args.strip(trailing = false, chars = {'%'})
 
 proc skipWhile(s: string, chars: set[char], start: int): int =
   result = start
@@ -266,6 +275,10 @@ proc builtinTakesLine(name, args: string, r: Resolver): bool =
     not (isIdent(ident) and wholeWord and r.isNimSymbol(ident))
   of "exit":
     args.len == 0 or args.allCharsInSet(Digits)
+  of "jobs":
+    args.len == 0
+  of "fg", "bg":
+    args.len == 0 or jobId(args).allCharsInSet(Digits)
   else:
     false
 
@@ -419,6 +432,10 @@ proc translatePart(part: string, r: Resolver): string =
   of "exit":
     let args = cmd[ident.len .. ^1].strip
     "quit(" & (if args.len == 0: "lastStatus" else: args) & ")"
+  of "jobs":
+    "jobs()"
+  of "fg", "bg":
+    ident & "(" & jobId(cmd[ident.len .. ^1].strip) & ")"
   else:
     nimCall("run", cmd, exprs)
 

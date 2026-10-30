@@ -5,7 +5,7 @@
 ## everything else.
 
 import std/[os, posix, strutils]
-import ./commands
+import ./[commands, jobs]
 
 type ShellError* = object of CatchableError
 
@@ -117,13 +117,22 @@ proc childRedirect(fd: cint, kind: RedirectKind, target: string) =
   discard dup2(f, fd)
   discard close(f)
 
-proc spawn(cmd: Expanded, stdinFd, stdoutFd: cint, closeFds: seq[cint]): Pid =
+proc spawn(
+    cmd: Expanded,
+    stdinFd, stdoutFd: cint,
+    closeFds: seq[cint],
+    pgid: var Pid,
+    foreground: bool,
+): Pid =
+  ## `pgid` is the job's process group, 0 until its first process exists.
   result = fork()
   if result < 0:
     fail "fork failed: " & $strerror(errno)
   if result > 0:
+    parentJobSetup(result, pgid, foreground)
     return
   # The child. Only async-signal-safe calls from here to `execvp`.
+  childJobSetup(pgid, foreground)
   if stdinFd >= 0:
     discard dup2(stdinFd, 0)
   if stdoutFd >= 0:
@@ -137,18 +146,6 @@ proc spawn(cmd: Expanded, stdinFd, stdoutFd: cint, closeFds: seq[cint]): Pid =
   writeStderr "nish: " & cmd.argv[0] & ": " &
     (if notFound: "command not found" else: $strerror(errno)) & "\n"
   exitnow(if notFound: 127 else: 126)
-
-proc waitStatus(pid: Pid): int =
-  var status: cint = 0
-  while waitpid(pid, status, 0) < 0:
-    if errno != EINTR:
-      return 1
-  if WIFEXITED(status):
-    WEXITSTATUS(status)
-  elif WIFSIGNALED(status):
-    128 + WTERMSIG(status)
-  else:
-    1
 
 proc readAll(fd: cint): string =
   result = ""
@@ -165,11 +162,11 @@ proc runPipeline(
     pipeline: Pipeline,
     splices: seq[seq[string]],
     next: var int,
-    capture: bool,
+    capture, background: bool,
     output: var string,
 ): int =
-  ## Starts every command, then waits for all of them. The status is the
-  ## last command's.
+  ## Starts every command as one job, then waits for it unless it runs in
+  ## the background. The status is the last command's.
   var cmds: seq[Expanded] = @[]
   for cmd in pipeline:
     var e = Expanded()
@@ -181,12 +178,13 @@ proc runPipeline(
       fail "missing command"
     cmds.add e
   var pids: seq[Pid] = @[]
+  var pgid: Pid = 0
   var prevRead: cint = -1
   var captureRead: cint = -1
   for i, cmd in cmds:
     let last = i == cmds.high
     var fds: array[0 .. 1, cint] = [cint -1, -1]
-    if not last or capture:
+    if not last or (capture and not background):
       if pipe(fds) != 0:
         fail "pipe failed: " & $strerror(errno)
     var closeInChild: seq[cint] = @[]
@@ -195,7 +193,7 @@ proc runPipeline(
     if fds[0] >= 0:
       closeInChild.add fds[0]
       closeInChild.add fds[1]
-    pids.add spawn(cmd, prevRead, fds[1], closeInChild)
+    pids.add spawn(cmd, prevRead, fds[1], closeInChild, pgid, not background)
     if prevRead >= 0:
       discard close(prevRead)
     if fds[1] >= 0:
@@ -204,11 +202,16 @@ proc runPipeline(
       captureRead = fds[0]
     else:
       prevRead = fds[0]
+  var texts: seq[string] = @[]
+  for cmd in cmds:
+    texts.add cmd.argv.join(" ")
+  let job = addJob(pgid, pids, texts.join(" | "))
+  if background:
+    startBackground(job)
+    return 0
   if captureRead >= 0:
     output.add readAll(captureRead)
-  result = 0
-  for pid in pids:
-    result = waitStatus(pid)
+  waitForeground(job)
 
 proc execute*(
     line: string, splices: seq[seq[string]], capture: bool
@@ -235,7 +238,9 @@ proc execute*(
     if skip:
       next += countSplices(step.pipeline)
     else:
-      result.status = runPipeline(step.pipeline, splices, next, capture, result.output)
+      result.status = runPipeline(
+        step.pipeline, splices, next, capture, step.background, result.output
+      )
 
 proc expandLine*(line: string, splices: seq[seq[string]]): seq[string] =
   ## The words of a single command after expansion, without running it.

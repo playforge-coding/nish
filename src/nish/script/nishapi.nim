@@ -29,6 +29,29 @@ proc shellLastStatus(): int =
 proc shellWords(line: string, splices: seq[seq[string]]): seq[string] =
   discard "implemented by nish"
 
+proc shellJobs() =
+  discard "implemented by nish"
+
+proc shellFg(id: int): int =
+  discard "implemented by nish"
+
+proc shellBg(id: int) =
+  discard "implemented by nish"
+
+proc jobs*() =
+  ## Lists the background and stopped jobs.
+  shellJobs()
+
+proc fg*(id = 0): int {.discardable.} =
+  ## Brings a job to the foreground and waits for it. Without an id, the
+  ## most recent job, stopped ones first.
+  result = shellFg(id)
+  lastStatus = result
+
+proc bg*(id = 0) =
+  ## Lets a stopped job go on in the background.
+  shellBg(id)
+
 proc run*(line: string, splices: varargs[seq[string], toArgs]): int {.discardable.} =
   ## Runs a command line attached to the shell's terminal and returns the
   ## exit status of its last command. The line has shell syntax: pipes,

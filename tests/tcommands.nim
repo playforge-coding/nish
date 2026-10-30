@@ -50,8 +50,14 @@ suite "parseCommandLine":
     check cmd.argv == @["echo", "2"]
     check cmd.redirects[0].fd == 1
 
+  test "background jobs":
+    let line = parseCommandLine("a & b | c &; d")
+    check line.mapIt(it.background) == @[true, true, false]
+    check line[1].pipeline.len == 2
+    check parseCommandLine("a &")[0].background
+
   test "syntax errors":
-    for bad in ["a |", "a >", "'open", "&& a", "a &", "| a", "> f"]:
+    for bad in ["a |", "a >", "'open", "&& a", "& a", "a & && b", "| a", "> f"]:
       expect ValueError:
         discard parseCommandLine(bad)
 
@@ -103,6 +109,12 @@ suite "isCommandLine":
     check isCommandLine("exit", r)
     check isCommandLine("exit 3", r)
     check not isCommandLine("exit x", r)
+    check isCommandLine("jobs", r)
+    check isCommandLine("fg", r)
+    check isCommandLine("fg %2", r)
+    check isCommandLine("bg 1", r)
+    check not isCommandLine("fg x", r)
+    check not isCommandLine("jobs.len", r)
 
 suite "translate":
   test "extractSplices":
@@ -120,6 +132,10 @@ suite "translate":
     check translate("cd ~/x @(d)", r) == "cd(word(\"~/x \\x00\", d))"
     check translate("exit", r) == "quit(lastStatus)"
     check translate("exit 3", r) == "quit(3)"
+    check translate("jobs", r) == "jobs()"
+    check translate("fg", r) == "fg()"
+    check translate("fg %2", r) == "fg(2)"
+    check translate("bg 1", r) == "bg(1)"
 
   test "each part between semicolons is classified on its own":
     check translate("ls; echo x", r) == "run(\"ls\"); echo x"

@@ -64,6 +64,14 @@ test "lines that are commands despite their first word":
   check s.eval("ls @(tmp) > /dev/null; seen += 1; ls @(tmp) > /dev/null")
   check s.eval("doAssert seen == 1 and lastStatus == 0")
 
+test "background jobs":
+  check s.eval("doAssert run(\"sleep 0.2 &\") == 0")
+  check s.eval("doAssert fg() == 0 and lastStatus == 0")
+  check s.eval("sleep 0.1 & test 1 = 2 &")
+  check s.eval("doAssert fg(2) == 1")
+  check s.eval("doAssert fg(1) == 0")
+  check s.eval("doAssert fg() == 1") # no job left
+
 test "command lines see Nim symbols":
   check s.isNimSymbol("answer")
   check s.isNimSymbol("echo")

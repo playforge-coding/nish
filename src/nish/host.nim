@@ -2,7 +2,7 @@
 
 import std/strutils
 import compiler/[ast, vm, vmdef]
-import ./pipeline
+import ./[jobs, pipeline]
 
 var lastStatus = 0 ## of the last capture, read back by `shellLastStatus`
 
@@ -50,6 +50,15 @@ proc registerHostProcs*(vm: PCtx, pkg: string) =
 
   callback "shellLastStatus":
     a.setResult(BiggestInt lastStatus)
+
+  callback "shellJobs":
+    listJobs()
+
+  callback "shellFg":
+    a.setResult(BiggestInt foreground(int a.getInt(0)))
+
+  callback "shellBg":
+    background(int a.getInt(0))
 
   callback "shellWords":
     try:

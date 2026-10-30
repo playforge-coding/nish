@@ -3,7 +3,7 @@
 A terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM.
 
 > [!WARNING]
-> nish is an early spike. Job control, a startup file, completion and friendly error messages are not there yet.
+> nish is an early spike. A startup file, completion and friendly error messages are not there yet.
 
 ## What it looks like
 
@@ -26,7 +26,8 @@ nish> cd /tmp
 - `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim. Three things override that: a line containing `&&`, `||`, `>>` or `2>` is always a command, since those are never Nim; a leading `!` makes the whole line a command (`!echo x | wc -l`); and `run"echo x | wc -l"` is plain Nim.
 - `;` separates statements, each of which can be Nim or a command: `ls; echo "done"`.
 - Commands work anywhere a statement does, including inside loops and procs.
-- The NimScript API that `.nims` files have (`cd`, `getEnv`, `listFiles`, `exec` and so on) is built in. `cd` and `exit` also work as commands.
+- Job control works as you'd expect: `cmd &` runs in the background, Ctrl-Z stops the foreground job, and `jobs`, `fg` and `bg` manage them.
+- The NimScript API that `.nims` files have (`cd`, `getEnv`, `listFiles`, `exec` and so on) is built in. `cd`, `exit`, `jobs`, `fg` and `bg` also work as commands.
 
 Scripts work the same way:
 

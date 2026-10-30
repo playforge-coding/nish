@@ -1,7 +1,7 @@
 ## nish: a terminal shell whose language is NimScript.
 
 import std/[linenoise, monotimes, os, posix, strutils, times]
-import nish/[commands, input, session]
+import nish/[commands, input, jobs, session]
 
 const usage = """
 Usage:
@@ -36,8 +36,12 @@ proc isCommand(s: Session): proc(line: string): bool =
     isCommandLine(line, r)
 
 proc interact(s: Session) =
+  let read = promptReader()
   var chunk = ""
-  while readChunk(promptReader(), s.isCommand, chunk):
+  while true:
+    notify()
+    if not readChunk(read, s.isCommand, chunk):
+      break
     discard s.eval(chunk)
 
 proc runScript(s: Session, lines: seq[string]): bool =
@@ -78,13 +82,7 @@ proc main() =
       (getMonoTime() - started).inMilliseconds, " ms"
 
   if interactive:
-    # A handler, unlike ignoring the signal, resets to the default in child
-    # processes, so Ctrl-C stops the running program but not the shell.
-    signal(
-      SIGINT,
-      proc(sig: cint) {.noconv.} =
-        discard,
-    )
+    enableJobControl()
     s.interact()
   else:
     var lines =
