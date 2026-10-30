@@ -3,7 +3,7 @@
 A terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM.
 
 > [!WARNING]
-> nish is an early spike and is missing most of what you expect from a shell: pipes, redirects, globs and job control are not there yet.
+> nish is an early spike. Job control, a startup file, completion and friendly error messages are not there yet.
 
 ## What it looks like
 
@@ -14,14 +14,18 @@ nish> let dirs = @["src", "tests"]
 nish> for d in dirs:
   ...   ls -1 @(d)
   ...
-nish> echo "HOME is ", getEnv("HOME")
-nish> cd "/tmp"
+nish> git log --oneline | head -3 > ~/recent.txt && cat ~/recent.txt
+nish> let branch = sh"git branch --show-current"
+nish> echo "on ", branch, " in ", getEnv("HOME")
+nish> cd /tmp
 ```
 
-- `ls -1 @(d)` is a command, and `@(d)` puts the value of the Nim expression `d` into it as one argument.
-- `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim.
+- Command lines have shell syntax: pipes, `>`, `>>`, `<`, `2>&1`, `&&`, `||` and `;`, with globs, `~` and `$VAR` expanded in unquoted words.
+- `@(d)` puts the value of the Nim expression `d` into a command. A sequence becomes one argument per element.
+- `sh"..."` runs a command line and returns its output as a string; `lastStatus` holds the exit status of the last command.
+- `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim. Use `printf` or `run("echo ...")` for the program.
 - Commands work anywhere a statement does, including inside loops and procs.
-- The NimScript API that `.nims` files have (`cd`, `getEnv`, `listFiles`, `exec` and so on) is built in.
+- The NimScript API that `.nims` files have (`cd`, `getEnv`, `listFiles`, `exec` and so on) is built in. `cd` and `exit` also work as commands.
 
 Scripts work the same way:
 
@@ -43,7 +47,7 @@ flowchart LR
     E -->|run| F[Native host procs]
 ```
 
-Command lines become calls like `run(@["ls", "-1", $(d)])`. `run` is declared in Nim and implemented natively in nish, where it starts the program attached to the terminal.
+Command lines become calls like `run("ls -1 \0", d)`, where the NUL stands for the spliced value. `run` is declared in Nim and implemented natively in nish, which parses the shell syntax, expands the words and starts the processes with pipes between them.
 
 ## Building
 

@@ -1,4 +1,4 @@
-import std/[sequtils, unittest]
+import std/[sequtils, strutils, unittest]
 import nish/[commands, input]
 
 let r = Resolver(
@@ -8,21 +8,55 @@ let r = Resolver(
     name in ["ls", "git", "echo", "true", "rm", "./build.sh"],
 )
 
-proc texts(words: seq[Word]): seq[string] =
-  words.mapIt(it.text)
+proc text(w: Word): string =
+  w.mapIt(it.text).join
 
-suite "splitWords":
+proc argv(c: Command): seq[string] =
+  c.words.mapIt(it.text)
+
+suite "parseCommandLine":
   test "quoting":
-    check splitWords("""ls 'a b' "c \"d\"" e\ f""").texts ==
-      @["ls", "a b", "c \"d\"", "e f"]
+    let line = parseCommandLine("""ls 'a b' "c \"d\"" e\ f""")
+    check line.len == 1
+    check line[0].pipeline.len == 1
+    check line[0].pipeline[0].argv == @["ls", "a b", "c \"d\"", "e f"]
+
+  test "segments keep their quote kind":
+    let w = parseCommandLine("""a"b"'c'""")[0].pipeline[0].words[0]
+    check w.mapIt((it.text, it.quote)) == @[
+      ("a", qNone), ("b", qDouble), ("c", qSingle)
+    ]
+    check parseCommandLine("\"\"")[0].pipeline[0].argv == @[""]
 
   test "comments only start a word":
-    check splitWords("git log a#b # note").texts == @["git", "log", "a#b"]
+    check parseCommandLine("git log a#b # note")[0].pipeline[0].argv ==
+      @["git", "log", "a#b"]
 
-  test "splices":
-    let words = splitWords("ls @(dirs[0] & \"/x\") -l")
-    check words.texts == @["ls", "dirs[0] & \"/x\"", "-l"]
-    check words.mapIt(it.isNim) == @[false, true, false]
+  test "pipes and chains":
+    let line = parseCommandLine("a | b && c || d; e")
+    check line.mapIt(it.chain) == @[chAlways, chAnd, chOr, chAlways]
+    check line[0].pipeline.mapIt(it.argv) == @[@["a"], @["b"]]
+    check line[3].pipeline[0].argv == @["e"]
+    check parseCommandLine("a;").len == 1
+
+  test "redirects":
+    let cmd = parseCommandLine("cmd < in > out 2>> err 2>&1")[0].pipeline[0]
+    check cmd.argv == @["cmd"]
+    check cmd.redirects.mapIt((it.fd, it.kind, it.target.text)) ==
+      @[(0, rdRead, "in"), (1, rdWrite, "out"), (2, rdAppend, "err"), (2, rdDup, "1")]
+
+  test "a digit word with a space after it is an argument":
+    let cmd = parseCommandLine("echo 2 > f")[0].pipeline[0]
+    check cmd.argv == @["echo", "2"]
+    check cmd.redirects[0].fd == 1
+
+  test "syntax errors":
+    for bad in ["a |", "a >", "'open", "&& a", "a &", "| a", "> f"]:
+      expect ValueError:
+        discard parseCommandLine(bad)
+
+  test "countSplices":
+    check countSplices(parseCommandLine("a \0 b\0c > \0")[0].pipeline) == 3
 
 suite "isCommandLine":
   test "programs that are not Nim symbols":
@@ -40,14 +74,38 @@ suite "isCommandLine":
     check not isCommandLine("nosuchprogram x", r)
     check not isCommandLine("# ls", r)
 
+  test "builtins":
+    check isCommandLine("cd", r)
+    check isCommandLine("cd /tmp", r)
+    check isCommandLine("cd ..", r)
+    check isCommandLine("cd @(d)/x", r)
+    check not isCommandLine("cd \"/tmp\"", r)
+    check not isCommandLine("cd(x)", r)
+    check not isCommandLine("cd files", r) # a Nim symbol
+    check isCommandLine("exit", r)
+    check isCommandLine("exit 3", r)
+    check not isCommandLine("exit x", r)
+
 suite "translate":
+  test "extractSplices":
+    check extractSplices("""printf "@(a)" '@(b)' @(f(1, ")"))""") ==
+      (line: "printf \"\0\" '@(b)' \0", exprs: @["a", "f(1, \")\")"])
+    expect ValueError:
+      discard extractSplices("ls @(open")
+
   test "rewrites command lines and keeps indentation":
     check translate("for f in files:\n  rm -f @(f)", r) ==
-      "for f in files:\n  run(@[\"rm\", \"-f\", $(f)])"
+      "for f in files:\n  run(\"rm -f \\x00\", f)"
+
+  test "builtins":
+    check translate("cd", r) == "cd(getEnv(\"HOME\"))"
+    check translate("cd ~/x @(d)", r) == "cd(word(\"~/x \\x00\", d))"
+    check translate("exit", r) == "quit(lastStatus)"
+    check translate("exit 3", r) == "quit(3)"
 
   test "leaves triple quoted strings alone":
     let code = "let s = \"\"\"\nls -la\n\"\"\"\nls"
-    check translate(code, r) == "let s = \"\"\"\nls -la\n\"\"\"\nrun(@[\"ls\"])"
+    check translate(code, r) == "let s = \"\"\"\nls -la\n\"\"\"\nrun(\"ls\")"
 
 suite "chunks":
   let isCommand = proc(line: string): bool =

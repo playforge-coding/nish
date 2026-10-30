@@ -1,7 +1,15 @@
-import std/unittest
+import std/[os, unittest]
 import nish/session
 
 let s = newSession()
+removeDir(getTempDir() / "nish-tsession")
+createDir(getTempDir() / "nish-tsession")
+# Resolved, because `cd` tests compare it with `getCurrentDir()`.
+let tmp = expandFilename(getTempDir() / "nish-tsession")
+writeFile(tmp / "a.txt", "")
+writeFile(tmp / "b.txt", "")
+putEnv("NISH_TEST_VAR", "v")
+check s.eval("let tmp = \"" & tmp & "\"")
 
 test "state carries across inputs":
   check s.eval("var answer = 6 * 7")
@@ -13,16 +21,55 @@ test "an error is reported and the session goes on":
   check s.eval("answer += 1\ndoAssert answer == 43")
 
 test "commands run through the host":
-  check s.eval("doAssert run(@[\"true\"]) == 0")
-  check s.eval("doAssert run(@[\"false\"]) == 1")
-  check s.eval("let code = run(@[\"nish-no-such-program\"])")
-  check s.eval("doAssert code == 127")
+  check s.eval("doAssert run(\"true\") == 0")
+  check s.eval("doAssert run(\"test 1 = 2\") == 1 and lastStatus == 1")
+  check s.eval("doAssert run(\"nishnosuchprogram\") == 127 and lastStatus == 127")
+  check s.eval("doAssert run(\"printf >\") == 2") # a syntax error
+
+test "pipes, capture and chaining":
+  check s.eval("doAssert sh\"printf 'b\\na\\n' | sort\" == \"a\\nb\"")
+  check s.eval("doAssert sh\"test 1 = 2 && printf yes || printf no\" == \"no\"")
+  check s.eval("doAssert sh\"printf a; printf b\" == \"ab\"")
+  check s.eval("doAssert sh\"printf a; test 1 = 2\" == \"a\" and lastStatus == 1")
+
+test "redirects":
+  check s.eval("printf one > @(tmp)/out.txt\nprintf two >> @(tmp)/out.txt")
+  check s.eval("doAssert sh(\"cat < \" & tmp & \"/out.txt\") == \"onetwo\"")
+  check s.eval("doAssert sh(\"ls \" & tmp & \"/missing 2>&1\").len > 0")
+  check s.eval("doAssert sh(\"ls \" & tmp & \"/missing 2> /dev/null\") == \"\"")
+
+test "expansion":
+  check s.eval("doAssert words(\"\\0/[ab].txt\", tmp).len == 2")
+  check s.eval("doAssert words(\"'*.txt'\") == @[\"*.txt\"]")
+  check s.eval("doAssert words(\"nomatch*.txt\") == @[\"nomatch*.txt\"]")
+  check s.eval("doAssert word(\"~\") == getEnv(\"HOME\")")
+  check s.eval("doAssert word(\"$NISH_TEST_VAR\") == \"v\"")
+  check s.eval("doAssert word(\"\\\"${NISH_TEST_VAR}x\\\"\") == \"vx\"")
+  check s.eval("doAssert word(\"'$NISH_TEST_VAR'\") == \"$NISH_TEST_VAR\"")
+
+test "splices":
+  check s.eval("let xs = @[\"a\", \"b\"]")
+  check s.eval(
+    "doAssert words(\"x \\0 \\0 p\\0q\", xs, 3, xs[0]) == @[\"x\", \"a\", \"b\", \"3\", \"paq\"]"
+  )
+  check s.eval("doAssert words(\"\\0\", newSeq[string]()).len == 0")
+  check s.eval("doAssert sh(\"printf %s \\0\") == \"\"") # too few values
 
 test "command lines see Nim symbols":
   check s.isNimSymbol("answer")
   check s.isNimSymbol("echo")
   check not s.isNimSymbol("ls")
-  check s.eval("var dir = \"/\"\nls @(dir)")
+  check s.eval("doAssert sh(\"ls \" & tmp) == \"a.txt\\nb.txt\\nout.txt\"")
+
+test "the cd builtin":
+  let here = getCurrentDir()
+  check s.eval("cd @(tmp)\ndoAssert getCurrentDir() == tmp")
+  check s.eval("cd ..\ndoAssert getCurrentDir() == \"" & tmp.parentDir & "\"")
+  check s.eval("cd\ndoAssert getCurrentDir() == getEnv(\"HOME\")")
+  check s.eval("cd \"" & here & "\"")
+  check getCurrentDir() == here
 
 test "the NimScript API is there":
   check s.eval("doAssert getEnv(\"HOME\").len > 0")
+
+removeDir(tmp)

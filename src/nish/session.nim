@@ -92,6 +92,7 @@ proc newSession*(): Session =
   conf.searchPaths.add AbsoluteDir api
   conf.errorMax = high(int)
   conf.spellSuggestMax = 0
+  conf.notes.excl hintQuitCalled # `exit` at the prompt is not news
 
   let module = graph.makeStdinModule()
   module.incl sfMainModule

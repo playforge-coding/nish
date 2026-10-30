@@ -4,15 +4,16 @@
 
 nish is a terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM. It is written in Nim and embeds that VM through the compiler's API. License: 0BSD. The toolchain is pinned in `mise.toml` (Nim 2.4.0), and Nimble, which ships with Nim, handles the build, tasks and dependencies.
 
-Input is Nim first. A line is a command only when its first word is not a Nim keyword or a symbol in scope but does name a program, so `ls -la` runs `ls` while `echo x` is Nim's `echo`. Command lines are rewritten into Nim (`run(@["ls", "-la"])`) before the VM sees them, which lets them sit inside Nim blocks, and `@(expr)` puts a Nim value into a command as one argument.
+Input is Nim first. A line is a command only when its first word is not a Nim keyword or a symbol in scope but does name a program, so `ls -la` runs `ls` while `echo x` is Nim's `echo`. Command lines are rewritten into Nim (`run("ls -la")`) before the VM sees them, which lets them sit inside Nim blocks. The line keeps its shell syntax (pipes, redirects, `&&`, `||`, `;`, globs, `~`, `$VAR`) and the host parses it when `run` is called, so the same parser also serves `sh"..."`, which captures output. `@(expr)` puts a Nim value into a command: the rewriter replaces it with a NUL placeholder and passes the expression as an extra argument. The builtins `cd` and `exit` are rewritten to `cd(word(...))` and `quit(...)`.
 
 Modules in `src/`:
 
 - `nish.nim`: the entry point. Parses arguments, then runs the prompt (linenoise through `std/linenoise`) or a script.
 - `nish/session.nim`: the embedded VM. One long-lived module whose scope carries over between inputs. It drives parsing, `semWithPContext` and `interpreterCode` itself instead of calling `processPipelineModule`, because that raises out on the first error and loses the scope. Defines `nimconfig`, so `system/nimscript` (`cd`, `getEnv`, `exec`, `listFiles` and the rest of the `.nims` API) is there, implemented by the compiler's `setupVM`.
-- `nish/commands.nim`: decides which lines are commands and rewrites them. Pure: it asks a `Resolver` about symbols and programs, so tests need no VM.
+- `nish/commands.nim`: decides which lines are commands, rewrites them, and parses command lines into pipelines (`parseCommandLine`). Pure: it asks a `Resolver` about symbols and programs and never touches the file system, so tests need no VM.
 - `nish/input.nim`: groups lines into chunks the VM evaluates on its own. At the prompt it follows the compiler REPL's rules (a blank line ends a block); for scripts it looks ahead and splits at top-level statements.
-- `nish/host.nim`: native implementations of the procs scripts call, registered as VM callbacks.
+- `nish/pipeline.nim`: expands words (splices, `$VAR`, `~`, globs) and runs parsed lines with `fork`, `pipe` and `execvp` from `std/posix`. Between `fork` and `execvp` only async-signal-safe calls are allowed; failures there write with `posix.write` and leave with `exitnow`.
+- `nish/host.nim`: native implementations of the procs scripts call, registered as VM callbacks. Arguments arrive as literal AST through `getNode`, so a `seq[seq[string]]` is an `nkBracket` of `nkBracket`s.
 - `nish/script/nishapi.nim`: the Nim side of that API, imported into every session. The VM loads it from source at runtime.
 - `nish/embedded.nim`: the standard library and `nishapi.nim` built into the binary, since the VM compiles both from source at runtime. They are unpacked into the user's cache directory (`getCacheDir("nish")`) on the first run of a nish build, into `lib-<Nim version>` with a stamp file, and `nishapi.nim` is rewritten whenever the embedded copy differs. Delete that cache directory to test a first run.
 

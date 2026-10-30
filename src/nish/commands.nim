@@ -1,10 +1,14 @@
-## Finds command lines in input and rewrites them into Nim.
+## Shell command lines: finding them in input, rewriting them into Nim, and
+## parsing them into pipelines.
 ##
 ## Input is Nim first. A line is a command only when its first word is not a
 ## Nim keyword or a symbol in scope but does name a program, as in `ls -la`,
-## which becomes `run(@["ls", "-la"])`. Lines keep their indentation, so
-## commands also work inside Nim blocks. `@(expr)` puts the value of a Nim
-## expression into a command as one argument.
+## which becomes `run("ls -la")`. Lines keep their indentation, so commands
+## also work inside Nim blocks. `@(expr)` puts the value of a Nim expression
+## into a command; the rewriter replaces it with `splice` and passes the
+## expression as an argument, and `nishapi.run` hands both to the host, which
+## parses the line with `parseCommandLine` and runs it. Nothing here touches
+## the file system, so the parser is the same at the prompt and in `sh"..."`.
 
 import std/strutils
 
@@ -13,11 +17,47 @@ type
     isNimSymbol*: proc(name: string): bool
     isProgram*: proc(name: string): bool
 
-  Word* = object
+  Quote* = enum
+    qNone ## bare: globs, `~` and `$VAR` expand
+    qDouble ## only `$VAR` expands
+    qSingle ## nothing expands
+
+  Segment* = object
     text*: string
-    isNim*: bool ## `text` is a Nim expression from `@(...)`
+    quote*: Quote
+
+  Word* = seq[Segment]
+
+  RedirectKind* = enum
+    rdWrite ## `>`
+    rdAppend ## `>>`
+    rdRead ## `<`
+    rdDup ## `>&`: `target` is the descriptor to copy, as text
+
+  Redirect* = object
+    fd*: int
+    kind*: RedirectKind
+    target*: Word
+
+  Command* = object
+    words*: seq[Word]
+    redirects*: seq[Redirect]
+
+  Pipeline* = seq[Command]
+
+  Chain* = enum
+    chAlways ## `;`, or the first pipeline of the line
+    chAnd ## `&&`
+    chOr ## `||`
+
+  Step* = object
+    chain*: Chain ## how this pipeline depends on the one before it
+    pipeline*: Pipeline
+
+  CommandLine* = seq[Step]
 
 const
+  splice* = '\0' ## stands for a `@(expr)` value inside a command line
   nimKeywords = [
     "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast", "concept",
     "const", "continue", "converter", "defer", "discard", "distinct", "div", "do",
@@ -30,78 +70,204 @@ const
   # A first word directly followed by one of these is Nim: `ls(x)`, `ls.len`.
   nimFollowers = {'(', '[', '{', '.', '=', ':', ','}
 
-proc isIdent(word: string): bool =
-  word.len > 0 and word[0] in IdentStartChars and word.allCharsInSet(IdentChars)
+# Parsing
+
+type LineParser = object
+  s: string
+  i: int
+  word: Word
+  inWord: bool
+  pendingRedirect: int ## index of the redirect waiting for its target, or -1
+  command: Command
+  pipeline: Pipeline
+  chain: Chain
+  line: CommandLine
+
+proc fail(msg: string) =
+  raise newException(ValueError, msg)
+
+proc addText(p: var LineParser, text: string, quote: Quote) =
+  if p.inWord and p.word.len > 0 and p.word[^1].quote == quote:
+    p.word[^1].text.add text
+  else:
+    p.word.add Segment(text: text, quote: quote)
+  p.inWord = true
+
+proc finishWord(p: var LineParser) =
+  if not p.inWord:
+    return
+  if p.pendingRedirect >= 0:
+    p.command.redirects[p.pendingRedirect].target = p.word
+    p.pendingRedirect = -1
+  else:
+    p.command.words.add p.word
+  p.word = @[]
+  p.inWord = false
+
+proc finishCommand(p: var LineParser, before: string) =
+  ## `before` names the operator that ends the command, or is empty at the
+  ## end of the line.
+  p.finishWord()
+  if p.pendingRedirect >= 0:
+    fail "missing file after redirect"
+  if p.command.words.len == 0:
+    if p.command.redirects.len > 0:
+      fail "missing command before redirect"
+    if p.pipeline.len > 0:
+      fail "missing command after '|'"
+    if before.len > 0 and before != ";":
+      fail "missing command before '" & before & "'"
+    return
+  p.pipeline.add p.command
+  p.command = Command()
+
+proc finishPipeline(p: var LineParser, before: string, next: Chain) =
+  p.finishCommand(before)
+  if p.pipeline.len > 0:
+    p.line.add Step(chain: p.chain, pipeline: p.pipeline)
+    p.pipeline = @[]
+  elif before.len > 0 and before != ";":
+    fail "missing command before '" & before & "'"
+  p.chain = next
+
+proc readQuoted(p: var LineParser, quote: char) =
+  ## `p.i` is on the opening quote.
+  var text = ""
+  inc p.i
+  while p.i < p.s.len and p.s[p.i] != quote:
+    if quote == '"' and p.s[p.i] == '\\' and p.i + 1 < p.s.len and
+        p.s[p.i + 1] in {'"', '\\', '$'}:
+      inc p.i
+    text.add p.s[p.i]
+    inc p.i
+  if p.i >= p.s.len:
+    fail "missing closing " & quote
+  inc p.i
+  p.addText(text, if quote == '"': qDouble else: qSingle)
+
+proc takeFd(p: var LineParser, default: int): int =
+  ## A redirect's descriptor is the bare digits right before it, as in `2>`.
+  if p.inWord and p.word.len == 1 and p.word[0].quote == qNone and
+      p.word[0].text.allCharsInSet(Digits):
+    result = parseInt(p.word[0].text)
+    p.word = @[]
+    p.inWord = false
+  else:
+    p.finishWord()
+    result = default
+
+proc readRedirect(p: var LineParser) =
+  ## `p.i` is on `<` or `>`.
+  let c = p.s[p.i]
+  let fd = p.takeFd(if c == '<': 0 else: 1)
+  inc p.i
+  var r = Redirect(fd: fd, kind: if c == '<': rdRead else: rdWrite)
+  if c == '>' and p.i < p.s.len and p.s[p.i] == '>':
+    r.kind = rdAppend
+    inc p.i
+  elif c == '>' and p.i < p.s.len and p.s[p.i] == '&':
+    inc p.i
+    let start = p.i
+    while p.i < p.s.len and p.s[p.i] in Digits:
+      inc p.i
+    if p.i == start:
+      fail "missing descriptor after '>&'"
+    r.kind = rdDup
+    r.target = @[Segment(text: p.s[start ..< p.i], quote: qSingle)]
+    p.command.redirects.add r
+    return
+  p.command.redirects.add r
+  p.pendingRedirect = p.command.redirects.high
+
+proc parseCommandLine*(s: string): CommandLine =
+  ## Parses one line of shell syntax. Raises `ValueError` on bad syntax.
+  var p = LineParser(s: s, pendingRedirect: -1)
+  while p.i < p.s.len:
+    let c = p.s[p.i]
+    case c
+    of ' ', '\t':
+      p.finishWord()
+      inc p.i
+    of '\'', '"':
+      p.readQuoted(c)
+    of '\\':
+      inc p.i
+      if p.i < p.s.len:
+        p.addText($p.s[p.i], qSingle)
+        inc p.i
+      else:
+        p.addText("\\", qSingle)
+    of '#':
+      if p.inWord:
+        p.addText("#", qNone)
+        inc p.i
+      else:
+        break
+    of '|':
+      if p.i + 1 < p.s.len and p.s[p.i + 1] == '|':
+        p.finishPipeline("||", chOr)
+        inc p.i, 2
+      else:
+        p.finishCommand("|")
+        inc p.i
+    of '&':
+      if p.i + 1 < p.s.len and p.s[p.i + 1] == '&':
+        p.finishPipeline("&&", chAnd)
+        inc p.i, 2
+      else:
+        fail "background jobs ('&') are not supported yet"
+    of ';':
+      p.finishPipeline(";", chAlways)
+      inc p.i
+    of '<', '>':
+      p.readRedirect()
+    else:
+      p.addText($c, qNone)
+      inc p.i
+  p.finishPipeline("", chAlways)
+  p.line
+
+proc countSplices*(pipeline: Pipeline): int =
+  ## How many splice values the pipeline consumes, to skip them when `&&` or
+  ## `||` skips the pipeline itself.
+  result = 0
+  for cmd in pipeline:
+    for w in cmd.words:
+      for seg in w:
+        result += seg.text.count(splice)
+    for r in cmd.redirects:
+      for seg in r.target:
+        result += seg.text.count(splice)
+
+# Finding and rewriting command lines
+
+const builtins = ["cd", "exit"]
 
 proc skipWhile(s: string, chars: set[char], start: int): int =
   result = start
   while result < s.len and s[result] in chars:
     inc result
 
-proc splitWords*(s: string): seq[Word] =
-  ## Splits a command line into words the way a POSIX shell does for plain
-  ## quoting: single quotes are literal, double quotes allow `\"` and `\\`,
-  ## and a backslash outside quotes escapes the next character. A `#` that
-  ## starts a word begins a comment, and `@(...)` that starts a word is Nim.
-  result = @[]
-  var word = ""
-  var inWord = false
-  var i = 0
-  while i < s.len:
-    let c = s[i]
-    case c
-    of Whitespace:
-      if inWord:
-        result.add Word(text: word)
-        word = ""
-        inWord = false
-    of '@':
-      if not inWord and i + 1 < s.len and s[i + 1] == '(':
-        var depth = 0
-        var j = i + 1
-        while j < s.len:
-          if s[j] == '(':
-            inc depth
-          elif s[j] == ')':
-            dec depth
-            if depth == 0:
-              break
-          inc j
-        result.add Word(text: s[i + 2 ..< min(j, s.len)], isNim: true)
-        i = j
-      else:
-        inWord = true
-        word.add c
-    of '\'':
-      inWord = true
-      inc i
-      while i < s.len and s[i] != '\'':
-        word.add s[i]
-        inc i
-    of '"':
-      inWord = true
-      inc i
-      while i < s.len and s[i] != '"':
-        if s[i] == '\\' and i + 1 < s.len and s[i + 1] in {'"', '\\'}:
-          inc i
-        word.add s[i]
-        inc i
-    of '\\':
-      inWord = true
-      if i + 1 < s.len:
-        inc i
-        word.add s[i]
-    of '#':
-      if inWord:
-        word.add c
-      else:
-        break
-    else:
-      inWord = true
-      word.add c
-    inc i
-  if inWord:
-    result.add Word(text: word)
+proc isIdent(word: string): bool =
+  word.len > 0 and word[0] in IdentStartChars and word.allCharsInSet(IdentChars)
+
+proc builtinTakesLine(name, args: string, r: Resolver): bool =
+  ## Whether `name args` is the builtin's command form rather than Nim. Nim
+  ## still wins when the argument is a string literal, a parenthesis or a
+  ## symbol in scope: `cd "/tmp"`, `cd(dir)` and `cd dir` are Nim.
+  case name
+  of "cd":
+    if args.len == 0:
+      return true
+    if args[0] in {'"', '('}:
+      return false
+    let ident = args[0 ..< skipWhile(args, IdentChars, 0)]
+    let wholeWord = ident.len == args.len or args[ident.len] in Whitespace
+    not (isIdent(ident) and wholeWord and r.isNimSymbol(ident))
+  of "exit":
+    args.len == 0 or args.allCharsInSet(Digits)
+  else:
+    false
 
 proc isCommandLine*(line: string, r: Resolver): bool =
   let rest = line.strip(trailing = false)
@@ -111,9 +277,13 @@ proc isCommandLine*(line: string, r: Resolver): bool =
   if '/' in word:
     return r.isProgram(word)
   let ident = rest[0 ..< skipWhile(rest, IdentChars, 0)]
-  if not isIdent(ident) or ident in nimKeywords or r.isNimSymbol(ident):
+  if not isIdent(ident) or ident in nimKeywords:
     return false
   if ident.len < rest.len and rest[ident.len] in nimFollowers:
+    return false
+  if ident in builtins:
+    return builtinTakesLine(ident, rest[ident.len .. ^1].strip, r)
+  if r.isNimSymbol(ident):
     return false
   # `ls = 3` assigns, even with the space.
   let next = skipWhile(rest, Whitespace, ident.len)
@@ -122,19 +292,83 @@ proc isCommandLine*(line: string, r: Resolver): bool =
     return false
   ident == word and r.isProgram(ident)
 
+proc extractSplices*(line: string): tuple[line: string, exprs: seq[string]] =
+  ## Replaces each `@(expr)` outside single quotes with `splice` and returns
+  ## the expressions in order.
+  result = (line: "", exprs: @[])
+  var quote = ' '
+  var i = 0
+  while i < line.len:
+    let c = line[i]
+    if quote == '\'':
+      if c == '\'':
+        quote = ' '
+      result.line.add c
+    elif quote == '"' and c == '\\' and i + 1 < line.len:
+      result.line.add c
+      inc i
+      result.line.add line[i]
+    elif quote == '"' and c == '"':
+      quote = ' '
+      result.line.add c
+    elif quote == ' ' and c in {'\'', '"'}:
+      quote = c
+      result.line.add c
+    elif c == '@' and i + 1 < line.len and line[i + 1] == '(':
+      var depth = 0
+      var j = i + 1
+      var inString = false
+      while j < line.len:
+        if inString:
+          if line[j] == '\\':
+            inc j
+          elif line[j] == '"':
+            inString = false
+        elif line[j] == '"':
+          inString = true
+        elif line[j] == '(':
+          inc depth
+        elif line[j] == ')':
+          dec depth
+          if depth == 0:
+            break
+        inc j
+      if j >= line.len:
+        fail "missing closing parenthesis in @(...)"
+      result.exprs.add line[i + 2 ..< j]
+      result.line.add splice
+      i = j
+    else:
+      result.line.add c
+    inc i
+
+proc nimCall(name, line: string, exprs: seq[string]): string =
+  var lit = ""
+  lit.addQuoted line
+  result = name & "(" & lit
+  for e in exprs:
+    result.add ", " & e
+  result.add ")"
+
 proc translateLine*(line: string, r: Resolver): string =
   if not isCommandLine(line, r):
     return line
-  let indent = line.len - line.strip(trailing = false).len
-  var args: seq[string] = @[]
-  for word in splitWords(line):
-    if word.isNim:
-      args.add "$(" & word.text & ")"
+  let rest = line.strip(trailing = false)
+  let indent = line[0 ..< line.len - rest.len]
+  let ident = rest[0 ..< skipWhile(rest, IdentChars, 0)]
+  let (cmd, exprs) = extractSplices(rest)
+  case ident
+  of "cd":
+    let args = cmd[ident.len .. ^1].strip
+    if args.len == 0:
+      indent & "cd(getEnv(\"HOME\"))"
     else:
-      var lit = ""
-      lit.addQuoted word.text
-      args.add lit
-  line[0 ..< indent] & "run(@[" & args.join(", ") & "])"
+      indent & "cd(" & nimCall("word", args, exprs) & ")"
+  of "exit":
+    let args = cmd[ident.len .. ^1].strip
+    indent & "quit(" & (if args.len == 0: "lastStatus" else: args) & ")"
+  else:
+    indent & nimCall("run", cmd, exprs)
 
 proc translate*(code: string, r: Resolver): string =
   ## Rewrites every command line in `code`, leaving lines inside triple

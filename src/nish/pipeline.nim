@@ -1,0 +1,254 @@
+## Runs parsed command lines: expands their words and starts the processes.
+##
+## Processes are started with `fork` and `execvp` through `std/posix`, with
+## pipes between the commands of a pipeline and the shell's own terminal for
+## everything else.
+
+import std/[os, posix, strutils]
+import ./commands
+
+type ShellError* = object of CatchableError
+
+proc fail(msg: string) =
+  raise newException(ShellError, msg)
+
+# Expansion
+
+proc expandVars(text: string): string =
+  ## `$NAME` and `${NAME}`; an unset variable expands to nothing.
+  result = ""
+  var i = 0
+  while i < text.len:
+    if text[i] == '$' and i + 1 < text.len and
+        (text[i + 1] in IdentStartChars or text[i + 1] == '{'):
+      inc i
+      var name: string
+      if text[i] == '{':
+        let close = text.find('}', i)
+        if close < 0:
+          fail "missing '}' in " & text
+        name = text[i + 1 ..< close]
+        i = close + 1
+      else:
+        var stop = i
+        while stop < text.len and text[stop] in IdentChars:
+          inc stop
+        name = text[i ..< stop]
+        i = stop
+      result.add getEnv(name)
+    else:
+      result.add text[i]
+      inc i
+
+proc takeSplice(splices: seq[seq[string]], next: var int): seq[string] =
+  if next >= splices.len:
+    fail "more @(...) splices than values"
+  result = splices[next]
+  inc next
+
+proc expandWord*(w: Word, splices: seq[seq[string]], next: var int): seq[string] =
+  ## One word can become several arguments through a glob or a spliced
+  ## sequence, or none through an empty sequence.
+  if w.len == 1 and w[0].quote == qNone and w[0].text == $splice:
+    return takeSplice(splices, next)
+  var text = ""
+  var globbing = false
+  for seg in w:
+    var t =
+      if seg.quote == qSingle:
+        seg.text
+      else:
+        expandVars(seg.text)
+    while true:
+      let k = t.find(splice)
+      if k < 0:
+        break
+      let value = takeSplice(splices, next)
+      if value.len != 1:
+        fail "a value spliced into the middle of a word must be one string"
+      t = t[0 ..< k] & value[0] & t[k + 1 .. ^1]
+    if seg.quote == qNone and t.contains({'*', '?', '['}):
+      globbing = true
+    text.add t
+  if w[0].quote == qNone and w[0].text.len > 0 and w[0].text[0] == '~' and
+      (w[0].text.len == 1 or w[0].text[1] == '/'):
+    text = getHomeDir().strip(leading = false, chars = {'/'}) & text[1 .. ^1]
+  if globbing:
+    var matches: seq[string] = @[]
+    for path in walkPattern(text):
+      matches.add path
+    if matches.len > 0:
+      return matches
+  @[text]
+
+proc expandOne(w: Word, splices: seq[seq[string]], next: var int): string =
+  let ws = expandWord(w, splices, next)
+  if ws.len != 1:
+    fail "expected one word, got " & $ws.len
+  ws[0]
+
+# Processes
+
+type Expanded = object
+  argv: seq[string]
+  redirects: seq[tuple[fd: cint, kind: RedirectKind, target: string]]
+
+proc writeStderr(msg: string) =
+  discard posix.write(2, msg.cstring, msg.len)
+
+proc childRedirect(fd: cint, kind: RedirectKind, target: string) =
+  if kind == rdDup:
+    discard dup2(cint parseInt(target), fd)
+    return
+  let flags: cint =
+    case kind
+    of rdRead:
+      O_RDONLY
+    of rdWrite:
+      O_WRONLY or O_CREAT or O_TRUNC
+    of rdAppend:
+      O_WRONLY or O_CREAT or O_APPEND
+    of rdDup:
+      0
+  let f = posix.open(target.cstring, flags, 0o644)
+  if f < 0:
+    writeStderr "nish: " & target & ": " & $strerror(errno) & "\n"
+    exitnow(1)
+  discard dup2(f, fd)
+  discard close(f)
+
+proc spawn(cmd: Expanded, stdinFd, stdoutFd: cint, closeFds: seq[cint]): Pid =
+  result = fork()
+  if result < 0:
+    fail "fork failed: " & $strerror(errno)
+  if result > 0:
+    return
+  # The child. Only async-signal-safe calls from here to `execvp`.
+  if stdinFd >= 0:
+    discard dup2(stdinFd, 0)
+  if stdoutFd >= 0:
+    discard dup2(stdoutFd, 1)
+  for fd in closeFds:
+    discard close(fd)
+  for r in cmd.redirects:
+    childRedirect(r.fd, r.kind, r.target)
+  discard execvp(cmd.argv[0].cstring, allocCStringArray(cmd.argv))
+  let notFound = errno == ENOENT
+  writeStderr "nish: " & cmd.argv[0] & ": " &
+    (if notFound: "command not found" else: $strerror(errno)) & "\n"
+  exitnow(if notFound: 127 else: 126)
+
+proc waitStatus(pid: Pid): int =
+  var status: cint = 0
+  while waitpid(pid, status, 0) < 0:
+    if errno != EINTR:
+      return 1
+  if WIFEXITED(status):
+    WEXITSTATUS(status)
+  elif WIFSIGNALED(status):
+    128 + WTERMSIG(status)
+  else:
+    1
+
+proc readAll(fd: cint): string =
+  result = ""
+  var buf: array[4096, char]
+  while true:
+    let n = posix.read(fd, addr buf[0], buf.len)
+    if n > 0:
+      result.add buf.toOpenArray(0, n - 1).join("")
+    elif n == 0 or errno != EINTR:
+      break
+  discard close(fd)
+
+proc runPipeline(
+    pipeline: Pipeline,
+    splices: seq[seq[string]],
+    next: var int,
+    capture: bool,
+    output: var string,
+): int =
+  ## Starts every command, then waits for all of them. The status is the
+  ## last command's.
+  var cmds: seq[Expanded] = @[]
+  for cmd in pipeline:
+    var e = Expanded()
+    for w in cmd.words:
+      e.argv.add expandWord(w, splices, next)
+    for r in cmd.redirects:
+      e.redirects.add (cint r.fd, r.kind, expandOne(r.target, splices, next))
+    if e.argv.len == 0:
+      fail "missing command"
+    cmds.add e
+  var pids: seq[Pid] = @[]
+  var prevRead: cint = -1
+  var captureRead: cint = -1
+  for i, cmd in cmds:
+    let last = i == cmds.high
+    var fds: array[0 .. 1, cint] = [cint -1, -1]
+    if not last or capture:
+      if pipe(fds) != 0:
+        fail "pipe failed: " & $strerror(errno)
+    var closeInChild: seq[cint] = @[]
+    if prevRead >= 0:
+      closeInChild.add prevRead
+    if fds[0] >= 0:
+      closeInChild.add fds[0]
+      closeInChild.add fds[1]
+    pids.add spawn(cmd, prevRead, fds[1], closeInChild)
+    if prevRead >= 0:
+      discard close(prevRead)
+    if fds[1] >= 0:
+      discard close(fds[1])
+    if last:
+      captureRead = fds[0]
+    else:
+      prevRead = fds[0]
+  if captureRead >= 0:
+    output.add readAll(captureRead)
+  result = 0
+  for pid in pids:
+    result = waitStatus(pid)
+
+proc execute*(
+    line: string, splices: seq[seq[string]], capture: bool
+): tuple[status: int, output: string] =
+  ## Runs a command line. With `capture`, standard output of every pipeline
+  ## is collected into `output` instead of going to the terminal.
+  let steps =
+    try:
+      parseCommandLine(line)
+    except ValueError as e:
+      fail e.msg
+      @[]
+  result = (status: 0, output: "")
+  var next = 0
+  for step in steps:
+    let skip =
+      case step.chain
+      of chAlways:
+        false
+      of chAnd:
+        result.status != 0
+      of chOr:
+        result.status == 0
+    if skip:
+      next += countSplices(step.pipeline)
+    else:
+      result.status = runPipeline(step.pipeline, splices, next, capture, result.output)
+
+proc expandLine*(line: string, splices: seq[seq[string]]): seq[string] =
+  ## The words of a single command after expansion, without running it.
+  let steps =
+    try:
+      parseCommandLine(line)
+    except ValueError as e:
+      fail e.msg
+      @[]
+  if steps.len != 1 or steps[0].pipeline.len != 1 or
+      steps[0].pipeline[0].redirects.len > 0:
+    fail "expected a single command without pipes or redirects: " & line
+  result = @[]
+  var next = 0
+  for w in steps[0].pipeline[0].words:
+    result.add expandWord(w, splices, next)
