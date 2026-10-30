@@ -14,12 +14,13 @@ Modules in `src/`:
 - `nish/input.nim`: groups lines into chunks the VM evaluates on its own. At the prompt it follows the compiler REPL's rules (a blank line ends a block); for scripts it looks ahead and splits at top-level statements.
 - `nish/host.nim`: native implementations of the procs scripts call, registered as VM callbacks.
 - `nish/script/nishapi.nim`: the Nim side of that API, imported into every session. The VM loads it from source at runtime.
+- `nish/embedded.nim`: the standard library and `nishapi.nim` built into the binary, since the VM compiles both from source at runtime. They are unpacked into the user's cache directory (`getCacheDir("nish")`) on the first run of a nish build, into `lib-<Nim version>` with a stamp file, and `nishapi.nim` is rewritten whenever the embedded copy differs. Delete that cache directory to test a first run.
 
 Things about the compiler API that are easy to get wrong:
 
 - The VM matches a callback by `<package>.<module>.<proc>`, where the package is the name of the nearest `.nimble` file above the module (or `unknown`). `session.nim` asks the compiler for `nishapi`'s package instead of hard-coding it.
 - The compiler modules import as `compiler/...` through `--path:"$nim"` in `config.nims`. Some, like `packagehandling`, are include files and can't be imported on their own.
-- The VM compiles the stdlib and `nishapi` from source when a session starts. Both paths are currently fixed at build time, so the binary only works on the machine that built it.
+- The embedded stdlib includes `stdlib.nimble` on purpose: it makes the package name `stdlib`, and the compiler's own VM callbacks are registered under names like `stdlib.system.getEnv`. Without it nothing in the NimScript API would work.
 
 ## Building and testing
 

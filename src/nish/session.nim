@@ -6,25 +6,19 @@
 ## reported and skipped while the module's scope, and everything defined in
 ## it, carries on to the next input.
 
-import std/[compilesettings, os, strutils]
+import std/[os, strutils]
 import
   compiler/[
     ast, condsyms, idents, lineinfos, llstream, lookups, modulegraphs, modules, options,
     parser, pathutils, pipelines, scriptconfig, sem, semdata, syntaxes, vm, vmdef,
   ]
-import ./[commands, host]
+import ./[commands, embedded, host]
 
 type Session* = ref object
   graph: ModuleGraph
   module: PSym
   ctx: PContext
   backend: PPassContext
-
-const
-  # TODO: ship or embed these for installs. The VM compiles the stdlib from
-  # source, so it needs the files at runtime, not only when building nish.
-  stdlibDir = querySetting(libPath)
-  scriptDir = currentSourcePath().parentDir / "script"
 
 proc errorCount(s: Session): int =
   s.graph.config.errorCounter
@@ -90,10 +84,12 @@ proc newSession*(): Session =
   # Includes `system/nimscript`: `cd`, `getEnv`, `exec`, `listFiles` and the
   # rest of the API `.nims` files have, implemented by `setupVM`.
   defineSymbol(conf.symbols, "nimconfig")
-  conf.libpath = AbsoluteDir stdlibDir
+  let lib = stdlibDir()
+  let api = nishapiDir()
+  conf.libpath = AbsoluteDir lib
   for dir in ["", "pure", "core", "pure/collections", "impure", "std"]:
-    conf.searchPaths.add AbsoluteDir(stdlibDir / dir)
-  conf.searchPaths.add AbsoluteDir scriptDir
+    conf.searchPaths.add AbsoluteDir(lib / dir)
+  conf.searchPaths.add AbsoluteDir api
   conf.errorMax = high(int)
   conf.spellSuggestMax = 0
 
@@ -102,7 +98,7 @@ proc newSession*(): Session =
   let idgen = idGeneratorFromModule(module)
   let vm = setupVM(module, cache, "nish", graph, idgen)
   vm.features.incl allowInfiniteLoops
-  registerHostProcs(vm, getPackageName(conf, scriptDir / "nishapi.nim"))
+  registerHostProcs(vm, getPackageName(conf, api / "nishapi.nim"))
   graph.vm = vm
   graph.setPipeLinePass(EvalPass)
   graph.compilePipelineSystemModule()

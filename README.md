@@ -3,7 +3,7 @@
 A terminal shell whose language is [NimScript](https://nim-lang.org/docs/nims.html), the subset of Nim that runs in the compiler's VM.
 
 > [!WARNING]
-> nish is an early spike. It runs on the machine that built it and is missing most of what you expect from a shell: pipes, redirects, globs and job control are not there yet.
+> nish is an early spike and is missing most of what you expect from a shell: pipes, redirects, globs and job control are not there yet.
 
 ## What it looks like
 
@@ -56,7 +56,7 @@ nimble build   # produces ./nish
 nimble test
 ```
 
-`./nish --timing` prints how long the VM took to start.
+The binary carries the Nim standard library with it and unpacks it into your cache directory the first time it runs, so it doesn't need Nim installed. `./nish --timing` prints how long the VM took to start.
 
 ## License
 
