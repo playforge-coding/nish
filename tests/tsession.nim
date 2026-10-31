@@ -168,6 +168,10 @@ test "command lines see Nim symbols":
   check s.isNimSymbol("answer")
   check s.isNimSymbol("echo")
   check not s.isNimSymbol("ls")
+  # Only as declared: `mkdir` is the program, `mkDir` the NimScript proc.
+  check s.isNimSymbol("mkDir")
+  check not s.isNimSymbol("mkdir")
+  check s.eval("mkdir -p @(tmp)/made/here\ndoAssert dirExists(tmp & \"/made/here\")")
   check s.eval(
     "doAssert sh(\"ls \" & tmp & \"/[ab].txt | wc -l | tr -d ' '\") == \"2\""
   )

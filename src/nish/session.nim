@@ -81,10 +81,15 @@ proc evalNim*(s: Session, code: string, line = 1): bool =
   s.errorCount == before
 
 proc isNimSymbol*(s: Session, name: string): bool =
+  ## Whether `name`, spelled exactly like that, is a Nim symbol in scope.
+  ## Nim itself would also accept `mkdir` for NimScript's `mkDir`, but at a
+  ## shell prompt `mkdir` means the program.
   let ident = getIdent(s.graph.cache, name)
   var ambiguous = false
-  searchInScopes(s.ctx, ident, ambiguous) != nil or
-    someSymFromImportTable(s.ctx, ident, ambiguous) != nil
+  var sym = searchInScopes(s.ctx, ident, ambiguous)
+  if sym == nil:
+    sym = someSymFromImportTable(s.ctx, ident, ambiguous)
+  sym != nil and sym.name.s == name
 
 proc resolver*(s: Session): Resolver =
   Resolver(

@@ -548,7 +548,23 @@ proc lineContexts*(
       code.add line[i]
     depth = max(lineDepth, 0)
     let tail = code.strip(leading = false)
-    if first in sectionWords and
+    # `onDirChange.add proc(dir: string) =` and `let f = proc(x: int): int =`
+    # open a body like a named routine does.
+    var anonymous = -1
+    if depth == 0 and tail.endsWith("="):
+      for word in ["proc", "func", "iterator"]:
+        for opener in [word & "(", word & " ("]:
+          let k = code.find(opener)
+          if k >= 0 and (k == 0 or code[k - 1] notin IdentChars):
+            anonymous = k
+    if anonymous >= 0:
+      if first in ["let", "var", "const"]:
+        stack[^1].locals.add declaredNames(stripped)
+      stack.add Block(
+        indent: indent, locals: paramNames(code[anonymous .. ^1]) & @["result"]
+      )
+      continued = false
+    elif first in sectionWords and
         (stripped == first or tail.endsIn({'=', ':'}) or first == "type"):
       if stripped == first or first == "type":
         stack.add Block(indent: indent, declaration: true)

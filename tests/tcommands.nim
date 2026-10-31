@@ -203,6 +203,12 @@ suite "translate":
     check translate("for f in files:\n  let time = 1\n  time", r) ==
       "for f in files:\n  let time = 1\n  time"
 
+  test "anonymous procs open a body":
+    check translate("onDirChange.add proc(dir: string) =\n  ls @(dir)", r) ==
+      "onDirChange.add proc(dir: string) =\n  run(\"ls \\x00\", dir)"
+    check translate("let f = proc(time: int): int =\n  time", r) ==
+      "let f = proc(time: int): int =\n  time"
+
   test "commands still work in procs and loops":
     check translate("proc f() =\n  ls -la", r) == "proc f() =\n  run(\"ls -la\")"
     check translate("cd /usr/\nls", r) == "cd(word(\"/usr/\"))\nrun(\"ls\")"
