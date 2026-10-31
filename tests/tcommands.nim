@@ -203,6 +203,49 @@ suite "translate":
     check translate("for f in files:\n  let time = 1\n  time", r) ==
       "for f in files:\n  let time = 1\n  time"
 
+  test "anonymous procs open a body":
+    check translate("onDirChange.add proc(dir: string) =\n  ls @(dir)", r) ==
+      "onDirChange.add proc(dir: string) =\n  run(\"ls \\x00\", dir)"
+    check translate("let f = proc(time: int): int =\n  time", r) ==
+      "let f = proc(time: int): int =\n  time"
+    check translate("let f = proc(dir: string) =\n  ls @(dir)", r) ==
+      "let f = proc(dir: string) =\n  run(\"ls \\x00\", dir)"
+    # The outer proc's parameters, not those of a proc type among them.
+    let nested = "let f = proc(time: int; cb: func(y: int): int) =\n  time"
+    check translate(nested, r) == nested
+    # The first `proc(` that is a word, not the end of `wrapproc(`.
+    let later = "hooks.add wrapproc(1) or proc(time: int) =\n  time"
+    check translate(later, r) == later
+
+  test "a line ending in a string is not continued":
+    check translate("let x = \"a\"\nls", r) == "let x = \"a\"\nrun(\"ls\")"
+    check translate("var s = \"\"\nls", r) == "var s = \"\"\nrun(\"ls\")"
+
+  test "routines declared earlier in the input count as Nim":
+    check findUnknownCommand("proc say_hi(n: string) = discard\nsayHi \"x\"", r) == ""
+
+  test "do blocks declare their parameters":
+    let body = "onDirChange.add do (time: string):\n  time"
+    check translate(body, r) == body
+    check translate("onDirChange.add do (d: string):\n  ls @(d)", r) ==
+      "onDirChange.add do (d: string):\n  run(\"ls \\x00\", d)"
+
+  test "proc types are not bodies":
+    # A callback parameter doesn't replace the routine's own parameters.
+    for header in [
+      "proc f(time: int, cb: proc()) =", "proc f(time: int, cb: proc() = nil) ="
+    ]:
+      check translate(header & "\n  time", r) == header & "\n  time"
+    # A proc return type has no parameters of its own to declare here.
+    check translate("proc mk(): proc(time: int) =\n  time", r) ==
+      "proc mk(): proc(time: int) =\n  run(\"time\")"
+    # A proc-typed variable whose value is on the next line.
+    let typed = "let h: proc(dir: string) =\n  time"
+    check translate(typed, r) == typed
+    # A proc type in brackets, before the real anonymous proc.
+    check translate("let f: (proc (time: int)) = proc(dir: int) =\n  time", r) ==
+      "let f: (proc (time: int)) = proc(dir: int) =\n  run(\"time\")"
+
   test "commands still work in procs and loops":
     check translate("proc f() =\n  ls -la", r) == "proc f() =\n  run(\"ls -la\")"
     check translate("cd /usr/\nls", r) == "cd(word(\"/usr/\"))\nrun(\"ls\")"

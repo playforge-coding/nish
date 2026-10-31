@@ -168,6 +168,25 @@ test "command lines see Nim symbols":
   check s.isNimSymbol("answer")
   check s.isNimSymbol("echo")
   check not s.isNimSymbol("ls")
+  # Nim matches names style insensitively, and so does `isNimSymbol`; only
+  # deciding a name that is also a program asks for the exact spelling, so
+  # `mkdir` is the program and `mkDir` the NimScript proc.
+  check s.isNimSymbol("mkDir", exact = true)
+  check s.isNimSymbol("mkdir")
+  check not s.isNimSymbol("mkdir", exact = true)
+  check s.eval("mkdir -p @(tmp)/made/here\ndoAssert dirExists(tmp & \"/made/here\")")
+  # Other spellings of a Nim name are still Nim, not "command not found".
+  check s.eval(
+    "var greeted = \"\"\nproc say_hi(name: string) = greeted = name\nsayHi \"bob\""
+  )
+  check s.eval("doAssert greeted == \"bob\"")
+  check s.eval("let myDir = \"" & tmp & "\"")
+  let here = getCurrentDir()
+  check s.eval("cd mydir\ndoAssert getCurrentDir() == myDir") # the variable
+  setCurrentDir(here)
+  # An overload spelled like the program is found among the candidates.
+  check s.eval("proc mkdir(x: int): int = x")
+  check s.isNimSymbol("mkdir", exact = true)
   check s.eval(
     "doAssert sh(\"ls \" & tmp & \"/[ab].txt | wc -l | tr -d ' '\") == \"2\""
   )
