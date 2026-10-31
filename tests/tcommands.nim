@@ -242,6 +242,9 @@ suite "translate":
     # A proc-typed variable whose value is on the next line.
     let typed = "let h: proc(dir: string) =\n  time"
     check translate(typed, r) == typed
+    # A proc type in brackets, before the real anonymous proc.
+    check translate("let f: (proc (time: int)) = proc(dir: int) =\n  time", r) ==
+      "let f: (proc (time: int)) = proc(dir: int) =\n  run(\"time\")"
 
   test "commands still work in procs and loops":
     check translate("proc f() =\n  ls -la", r) == "proc f() =\n  run(\"ls -la\")"

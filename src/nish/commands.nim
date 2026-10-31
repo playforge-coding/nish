@@ -483,11 +483,21 @@ proc findWord(code, word: string, start = 0): int =
     k = code.find(word, k + 1)
   -1
 
+proc bracketDepth(code: string, upto: int): int =
+  ## Brackets opened and not yet closed before `upto`.
+  result = 0
+  for c in code.toOpenArray(0, upto - 1):
+    if c in {'(', '[', '{'}:
+      inc result
+    elif c in {')', ']', '}'}:
+      dec result
+
 proc anonymousRoutine(code: string): int =
-  ## Where an anonymous `proc(...)`, `func(...)` or `iterator(...)` starts in
-  ## `code`, or -1. The earliest one counts, so a proc type among its
-  ## parameters doesn't, and one in a type position (`h: proc(x: int)`) is a
-  ## type, not a body.
+  ## Where an anonymous `proc(...)`, `func(...)` or `iterator(...)` that opens
+  ## a body starts in `code`, or -1. The earliest one counts, so a proc type
+  ## among its parameters doesn't. One in a type position (`h: proc(x: int)`)
+  ## is a type, and so is one inside brackets (`(proc(x: int))`): a body's
+  ## header is never nested, since its brackets would still be open.
   result = -1
   for word in ["proc", "func", "iterator"]:
     var k = findWord(code, word)
@@ -496,7 +506,8 @@ proc anonymousRoutine(code: string): int =
       var before = k - 1
       while before >= 0 and code[before] in Whitespace:
         dec before
-      if open < code.len and code[open] == '(' and (before < 0 or code[before] != ':'):
+      if open < code.len and code[open] == '(' and (before < 0 or code[before] != ':') and
+          bracketDepth(code, k) == 0:
         if result < 0 or k < result:
           result = k
         break

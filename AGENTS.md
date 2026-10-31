@@ -65,7 +65,7 @@ Use modern code practices:
 
 Always update the docs if necessary when changing or adding code. If the docs already contain outdated information, expand your scope to cover that info too. That includes this file: when the layout, build or tooling changes, update the overview and the build section here.
 
-The docs are a [Zensical](https://zensical.org) site: `zensical.toml` at the root, pages in `docs/`. `zensical build --strict` checks it and writes `site/` (ignored by git), and `zensical serve` previews it. The Docs workflow runs the strict build on pull requests that touch the docs, and the Pages workflow publishes the site on every push to `main` that does. Pages:
+The docs are a [Zensical](https://zensical.org) site: `zensical.toml` at the root, pages in `docs/`. `zensical build --strict` checks it and writes `site/` (ignored by git), and `zensical serve` previews it. One workflow, `.github/workflows/docs.yml`, runs the strict build on pull requests that touch the docs and, on pushes to `main` that do, runs it again and publishes the site to GitHub Pages. Keep it one workflow, so the build that gets deployed is the one pull requests check. Pages:
 
 - `index.md`: what nish is, with an example.
 - `getting-started.md`: building, a first session, scripts and options.

@@ -1,15 +1,18 @@
 name: Docs
 
-# Checks that the docs build without warnings, on pull requests that change
-# them. On main, the Pages workflow runs the same strict build before it
-# deploys, so this one doesn't run there too.
+# Builds the docs with a strict check on pull requests that change them, and
+# publishes them to GitHub Pages on pushes to main that do. One workflow for
+# both, so the build that gets deployed is the one pull requests check.
 
 on:
   pull_request:
-    paths:
+    paths: &paths
       - "docs/**"
       - "zensical.toml"
       - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths: *paths
   workflow_dispatch:
 
 permissions:
@@ -17,13 +20,15 @@ permissions:
 
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request replaces its check; a deploy always
+  # finishes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   ZENSICAL_VERSION: "0.0.72"
 
 jobs:
-  docs:
+  build:
     name: Docs
     runs-on: ubuntu-latest
     steps:
@@ -33,3 +38,25 @@ jobs:
 
       - name: Build docs
         run: uvx "zensical==${ZENSICAL_VERSION}" build --strict
+
+      - if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v6
+
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

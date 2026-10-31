@@ -50,4 +50,4 @@ zensical build --strict  # writes site/, which git ignores
 
 Update the docs in the same change as the code they describe. On the [roadmap](roadmap.md), check finished items off where they are instead of moving them to another section.
 
-A pull request that touches the docs runs a strict build. A push to `main` that changes `docs/`, `zensical.toml` or the Pages workflow publishes the site to GitHub Pages; other pushes leave it alone.
+The Docs workflow (`.github/workflows/docs.yml`) runs a strict build on pull requests that change `docs/`, `zensical.toml` or the workflow itself. A push to `main` that changes them runs the same build and publishes the site to GitHub Pages; other pushes leave it alone.
