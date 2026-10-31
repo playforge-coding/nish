@@ -14,7 +14,11 @@ import std/[sequtils, strutils]
 
 type
   Resolver* = object
-    isNimSymbol*: proc(name: string): bool
+    isNimSymbol*: proc(name: string): bool ## Style insensitive, as Nim matches names.
+    isExactNimSymbol*: proc(name: string): bool
+      ## Only a symbol declared with exactly this spelling. Decides a name
+      ## that is also a program: `mkdir` runs the program, `mkDir` is Nim.
+      ## Falls back to `isNimSymbol` when nil.
     isProgram*: proc(name: string): bool
 
   Quote* = enum
@@ -362,7 +366,8 @@ proc isCommandPart(part: string, r: Resolver): bool =
     return false
   if ident in builtins:
     return builtinTakesLine(ident, rest[ident.len .. ^1].strip, r)
-  if r.isNimSymbol(ident):
+  let nim = if r.isExactNimSymbol != nil: r.isExactNimSymbol else: r.isNimSymbol
+  if nim(ident):
     return false
   # `ls = 3` assigns, even with the space.
   let next = skipWhile(rest, Whitespace, ident.len)
@@ -437,26 +442,65 @@ proc paramNames(header: string): seq[string] =
   let open = header.find('(')
   if open < 0:
     return
+  # Split at commas and semicolons outside brackets, so `cb: proc(x: int)`
+  # stays one parameter; each part is a name, then maybe `: type` or `= x`.
   var depth = 0
-  var close = open
-  for i in open ..< header.len:
-    if header[i] == '(':
+  var part = ""
+  var parts: seq[string] = @[]
+  for i in open + 1 ..< header.len:
+    let c = header[i]
+    if c in {'(', '[', '{'}:
       inc depth
-    elif header[i] == ')':
-      dec depth
+    elif c in {')', ']', '}'}:
       if depth == 0:
-        close = i
         break
-  for group in header[open + 1 ..< close].split(';'):
-    var names = group
+      dec depth
+    elif c in {',', ';'} and depth == 0:
+      parts.add part
+      part = ""
+      continue
+    part.add c
+  parts.add part
+  for p in parts:
+    var name = p
     for sep in [':', '=']:
-      let k = names.find(sep)
+      let k = name.find(sep)
       if k >= 0:
-        names = names[0 ..< k]
-    for name in names.split(','):
-      let n = cleanName(name)
-      if n.len > 0:
-        result.add n
+        name = name[0 ..< k]
+    let n = cleanName(name)
+    if n.len > 0:
+      result.add n
+
+proc findWord(code, word: string, start = 0): int =
+  ## The first `word` in `code` at or after `start` that stands on its own,
+  ## or -1.
+  var k = code.find(word, start)
+  while k >= 0:
+    let before = k == 0 or code[k - 1] notin IdentChars
+    let after = k + word.len >= code.len or code[k + word.len] notin IdentChars
+    if before and after:
+      return k
+    k = code.find(word, k + 1)
+  -1
+
+proc anonymousRoutine(code: string): int =
+  ## Where an anonymous `proc(...)`, `func(...)` or `iterator(...)` starts in
+  ## `code`, or -1. The earliest one counts, so a proc type among its
+  ## parameters doesn't, and one in a type position (`h: proc(x: int)`) is a
+  ## type, not a body.
+  result = -1
+  for word in ["proc", "func", "iterator"]:
+    var k = findWord(code, word)
+    while k >= 0:
+      let open = skipWhile(code, Whitespace, k + word.len)
+      var before = k - 1
+      while before >= 0 and code[before] in Whitespace:
+        dec before
+      if open < code.len and code[open] == '(' and (before < 0 or code[before] != ':'):
+        if result < 0 or k < result:
+          result = k
+        break
+      k = findWord(code, word, k + 1)
 
 proc declaredNames(stripped: string): seq[string] =
   ## Names a statement declares: `let a = 1`, `var (x, y) = ...`, `for a, b in`.
@@ -540,47 +584,54 @@ proc lineContexts*(
       continue
     let first = stripped[0 ..< skipWhile(stripped, IdentChars, 0)]
     var lineDepth = 0
-    var code = ""
+    var code = "" ## the line without string contents and comment, for searching
+    var commentAt = line.len
     for (i, d) in unquoted(line):
       if line.startsComment(i):
+        commentAt = i
         break
       lineDepth = d
       code.add line[i]
     depth = max(lineDepth, 0)
-    let tail = code.strip(leading = false)
-    # `onDirChange.add proc(dir: string) =` and `let f = proc(x: int): int =`
-    # open a body like a named routine does.
-    var anonymous = -1
-    if depth == 0 and tail.endsWith("="):
-      for word in ["proc", "func", "iterator"]:
-        for opener in [word & "(", word & " ("]:
-          let k = code.find(opener)
-          if k >= 0 and (k == 0 or code[k - 1] notin IdentChars):
-            anonymous = k
-    if anonymous >= 0:
-      if first in ["let", "var", "const"]:
-        stack[^1].locals.add declaredNames(stripped)
+    # The real end of the line: `var s = ""` ends in a string, not in `=`.
+    let tail = line[0 ..< commentAt].strip(leading = false)
+    let section = first in sectionWords and stripped == first or first == "type"
+    if first in ["let", "var", "const"] and not section:
+      stack[^1].locals.add declaredNames(stripped)
+    elif first in routineWords:
+      let name = cleanName(stripped[first.len .. ^1])
+      if name.len > 0:
+        stack[^1].locals.add name # callable on the next lines, recursion too
+    # Where a routine's header starts, if this line opens its body: a named
+    # one (`proc f(x: int) =`), or an anonymous one (`hooks.add proc(x: int) =`,
+    # `let f = proc(x: int): int =`).
+    var header = -1
+    if first in routineWords and tail.endsWith("="):
+      header = code.len - code.strip(trailing = false).len
+    elif depth == 0 and tail.endsWith("="):
+      header = anonymousRoutine(code)
+    if header >= 0:
       stack.add Block(
-        indent: indent, locals: paramNames(code[anonymous .. ^1]) & @["result"]
+        indent: indent, locals: paramNames(code[header .. ^1]) & @["result"]
       )
       continued = false
-    elif first in sectionWords and
-        (stripped == first or tail.endsIn({'=', ':'}) or first == "type"):
-      if stripped == first or first == "type":
-        stack.add Block(indent: indent, declaration: true)
-      else:
-        stack[^1].locals.add declaredNames(stripped)
-      continued =
-        depth == 0 and tail.endsIn({'=', ','}) and stripped != first and first != "type"
-    elif first in routineWords and tail.endsWith("="):
-      stack.add Block(indent: indent, locals: paramNames(stripped) & @["result"])
+    elif section:
+      stack.add Block(indent: indent, declaration: true)
       continued = false
+    elif first in sectionWords and tail.endsIn({'=', ':'}):
+      continued = depth == 0 and tail.endsIn({'=', ','})
     elif depth == 0 and tail.endsWith(":"):
-      stack.add Block(indent: indent, locals: declaredNames(stripped))
+      # `for a, b in xs:` declares its loop variables, `hooks.add do (x: int):`
+      # its parameters.
+      let doAt = findWord(code, "do")
+      let locals =
+        if doAt >= 0:
+          paramNames(code[doAt .. ^1])
+        else:
+          declaredNames(stripped)
+      stack.add Block(indent: indent, locals: locals)
       continued = false
     else:
-      if first in ["let", "var", "const"]:
-        stack[^1].locals.add declaredNames(stripped)
       if isCommand != nil and isCommand(line, ctx.locals):
         depth = 0
         continued = false
@@ -592,9 +643,15 @@ proc lineContexts*(
 proc withLocals(r: Resolver, locals: seq[string]): Resolver =
   if locals.len == 0:
     return r
+  let normalized = locals.mapIt(it.nimIdentNormalize)
   Resolver(
     isNimSymbol: proc(name: string): bool =
-      name in locals or r.isNimSymbol(name),
+      name.nimIdentNormalize in normalized or r.isNimSymbol(name),
+    isExactNimSymbol: proc(name: string): bool =
+      name in locals or (
+        if r.isExactNimSymbol != nil: r.isExactNimSymbol(name)
+        else: r.isNimSymbol(name)
+      ),
     isProgram: r.isProgram,
   )
 

@@ -80,21 +80,36 @@ proc evalNim*(s: Session, code: string, line = 1): bool =
       s.recover(mark) # the VM already reported it
   s.errorCount == before
 
-proc isNimSymbol*(s: Session, name: string): bool =
-  ## Whether `name`, spelled exactly like that, is a Nim symbol in scope.
-  ## Nim itself would also accept `mkdir` for NimScript's `mkDir`, but at a
-  ## shell prompt `mkdir` means the program.
+proc candidates(s: Session, name: string): seq[PSym] =
+  ## Every symbol in scope that Nim would match `name` with, overloads and
+  ## other spellings included.
+  result = @[]
   let ident = getIdent(s.graph.cache, name)
-  var ambiguous = false
-  var sym = searchInScopes(s.ctx, ident, ambiguous)
-  if sym == nil:
-    sym = someSymFromImportTable(s.ctx, ident, ambiguous)
-  sym != nil and sym.name.s == name
+  for scope in allScopes(s.ctx.currentScope):
+    var it = default(TIdentIter)
+    var sym = initIdentIter(it, scope.symbols, ident)
+    while sym != nil:
+      result.add sym
+      sym = nextIdentIter(it, scope.symbols)
+  for sym in importedItems(s.ctx, ident):
+    result.add sym
+
+proc isNimSymbol*(s: Session, name: string, exact = false): bool =
+  ## Whether `name` is a Nim symbol in scope. Nim matches names style
+  ## insensitively, and so does this unless `exact`, which asks for a symbol
+  ## declared with exactly this spelling. Each symbol keeps the spelling it
+  ## was declared with: the compiler makes one identifier per spelling.
+  for sym in s.candidates(name):
+    if not exact or sym.name.s == name:
+      return true
+  false
 
 proc resolver*(s: Session): Resolver =
   Resolver(
     isNimSymbol: proc(name: string): bool =
       s.isNimSymbol(name),
+    isExactNimSymbol: proc(name: string): bool =
+      s.isNimSymbol(name, exact = true),
     isProgram: proc(name: string): bool =
       if '/' in name:
         fileExists(name)
