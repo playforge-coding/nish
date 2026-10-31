@@ -5,7 +5,7 @@ let r = Resolver(
   isNimSymbol: proc(name: string): bool =
     name in ["echo", "files", "true"],
   isProgram: proc(name: string): bool =
-    name in ["ls", "git", "echo", "true", "rm", "./build.sh"],
+    name in ["ls", "git", "echo", "true", "rm", "./build.sh", "time", "test", "cd/tool"],
 )
 
 proc text(w: Word): string =
@@ -27,6 +27,11 @@ suite "parseCommandLine":
       ("a", qNone), ("b", qDouble), ("c", qSingle)
     ]
     check parseCommandLine("\"\"")[0].pipeline[0].argv == @[""]
+
+  test "an escaped $ in double quotes is not expanded":
+    let w = parseCommandLine("""x "a\$HOME b"""")[0].pipeline[0].words[1]
+    check w.mapIt((it.text, it.quote)) ==
+      @[("a", qDouble), ("$", qSingle), ("HOME b", qDouble)]
 
   test "comments only start a word":
     check parseCommandLine("git log a#b # note")[0].pipeline[0].argv ==
@@ -57,7 +62,10 @@ suite "parseCommandLine":
     check parseCommandLine("a &")[0].background
 
   test "syntax errors":
-    for bad in ["a |", "a >", "'open", "&& a", "& a", "a & && b", "| a", "> f"]:
+    for bad in [
+      "a |", "a >", "'open", "&& a", "& a", "a & && b", "| a", "> f", "a &&", "a ||",
+      "printf hi > > out", "a 2>&",
+    ]:
       expect ValueError:
         discard parseCommandLine(bad)
 
@@ -85,10 +93,15 @@ suite "isCommandLine":
     check isCommandLine("echo a || echo b", r)
     check isCommandLine("echo x >> f", r)
     check isCommandLine("echo x 2>&1", r)
-    check isCommandLine("echo x 2> f", r)
+    check not isCommandLine("echo x 2> f", r) # `2>` is no longer enough; `!` it
     check not isCommandLine("echo \"a && b\"", r)
     check not isCommandLine("echo x > f", r) # `>` is Nim too
     check not isCommandLine("echo 2 > 1", r)
+
+  test "Nim that looks like shell syntax stays Nim":
+    check not isCommandLine("let b = 5>x", r)
+    check not isCommandLine("echo 3>2", r)
+    check not isCommandLine("echo x # see a && b", r)
 
   test "a leading ! makes the whole line a command":
     check isCommandLine("!echo x | wc -l", r)
@@ -170,6 +183,31 @@ suite "translate":
     check translate("proc f(a: int; b: int) = ls", r) == "proc f(a: int; b: int) = ls"
     check translate("true && ls; echo x", r) == "run(\"true && ls\"); echo x"
 
+  test "escapes and literals":
+    check translate("ls a\\;b", r) == "run(\"ls a\\\\;b\")" # `\;` is no separator
+    check extractSplices("ls \\@(x)") == (line: "ls \\@(x)", exprs: newSeq[string]())
+    check extractSplices("ls @(f(')'))").exprs == @["f(')')"]
+    check extractSplices("ls @(f('\\'', 2))").exprs == @["f('\\'', 2)"]
+    check translate("cd/tool x", r) == "run(\"cd/tool x\")"
+
+  test "Nim blocks: declarations, locals and comments are never commands":
+    let enumType = "type Color = enum\n  red\n  test"
+    check translate(enumType, r) == enumType
+    check findUnknownCommand(enumType, r) == ""
+    let body = "proc f(time: int): int =\n  time"
+    check translate(body, r) == body
+    check findUnknownCommand("proc f(x: int): int =\n  x", r) == ""
+    check findUnknownCommand("proc f(a, b: int): int =\n  a-b", r) == ""
+    check findUnknownCommand("#[\n  this is a note\n]#", r) == ""
+    check findUnknownCommand("let x = foo(\n  some thing)", r) == ""
+    check translate("for f in files:\n  let time = 1\n  time", r) ==
+      "for f in files:\n  let time = 1\n  time"
+
+  test "commands still work in procs and loops":
+    check translate("proc f() =\n  ls -la", r) == "proc f() =\n  run(\"ls -la\")"
+    check translate("cd /usr/\nls", r) == "cd(word(\"/usr/\"))\nrun(\"ls\")"
+    check findUnknownCommand("proc f() =\n  nosuch -x", r) == "nosuch"
+
   test "a leading ! keeps the whole line":
     check translate("!echo x | wc -l; echo y", r) == "run(\"echo x | wc -l; echo y\")"
     check translate("  ! ls @(d)", r) == "  run(\"ls \\x00\", d)"
@@ -198,6 +236,7 @@ suite "chunks":
     check not needsMoreInput("let s = \"\"\"\nabc\n\"\"\"", isCommand)
     check not needsMoreInput("ls *", isCommand)
     check not needsMoreInput("echo 1", isCommand)
+    check not needsMoreInput("let x = 1 # note:", isCommand)
 
   test "the prompt reads until a blank line ends a block":
     var input = @["for i in 0..2:", "  echo i", "", "ls *"]

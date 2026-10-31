@@ -10,7 +10,7 @@
 ## parses the line with `parseCommandLine` and runs it. Nothing here touches
 ## the file system, so the parser is the same at the prompt and in `sh"..."`.
 
-import std/strutils
+import std/[sequtils, strutils]
 
 type
   Resolver* = object
@@ -131,6 +131,8 @@ proc finishPipeline(p: var LineParser, before: string, next: Chain) =
     p.background = false
   elif before.len > 0 and before != ";":
     fail "missing command before '" & before & "'"
+  elif before.len == 0 and p.chain != chAlways:
+    fail "missing command after '" & (if p.chain == chAnd: "&&" else: "||") & "'"
   p.chain = next
 
 proc readQuoted(p: var LineParser, quote: char) =
@@ -141,6 +143,14 @@ proc readQuoted(p: var LineParser, quote: char) =
     if quote == '"' and p.s[p.i] == '\\' and p.i + 1 < p.s.len and
         p.s[p.i + 1] in {'"', '\\', '$'}:
       inc p.i
+      if p.s[p.i] == '$':
+        # A literal `$`: in a segment of its own that won't be expanded.
+        if text.len > 0:
+          p.addText(text, qDouble)
+          text = ""
+        p.addText("$", qSingle)
+        inc p.i
+        continue
     text.add p.s[p.i]
     inc p.i
   if p.i >= p.s.len:
@@ -163,6 +173,8 @@ proc readRedirect(p: var LineParser) =
   ## `p.i` is on `<` or `>`.
   let c = p.s[p.i]
   let fd = p.takeFd(if c == '<': 0 else: 1)
+  if p.pendingRedirect >= 0:
+    fail "missing file after redirect"
   inc p.i
   var r = Redirect(fd: fd, kind: if c == '<': rdRead else: rdWrite)
   if c == '>' and p.i < p.s.len and p.s[p.i] == '>':
@@ -283,7 +295,8 @@ proc builtinTakesLine(name, args: string, r: Resolver): bool =
     false
 
 iterator unquoted(s: string): tuple[i: int, depth: int] =
-  ## Positions outside quotes, with the bracket depth at each.
+  ## Positions outside quotes and backslash escapes, with the bracket depth
+  ## at each.
   var quote = ' '
   var depth = 0
   var i = 0
@@ -296,6 +309,8 @@ iterator unquoted(s: string): tuple[i: int, depth: int] =
         inc i
     elif c in {'\'', '"'}:
       quote = c
+    elif c == '\\':
+      inc i # the escaped character is text, not syntax
     else:
       if c in {'(', '[', '{'}:
         inc depth
@@ -304,15 +319,19 @@ iterator unquoted(s: string): tuple[i: int, depth: int] =
       yield (i, depth)
     inc i
 
+proc startsComment(s: string, i: int): bool =
+  ## A `#` at the start of a word begins a comment in Nim and in a shell.
+  s[i] == '#' and (i == 0 or s[i - 1] in Whitespace)
+
 proc hasShellOperator(s: string): bool =
-  ## `&&`, `||`, `>>`, `>&` and `2>` are never Nim, so a line holding one
-  ## outside quotes is a command whatever its first word is.
+  ## `&&`, `||`, `>>` and `>&` are never Nim, so a line holding one outside
+  ## quotes is a command whatever its first word is. (`2>` is not on the
+  ## list: `5>x` is a Nim comparison.)
   for (i, _) in unquoted(s):
+    if s.startsComment(i):
+      return false
     if s[i] in {'&', '|', '>'} and i + 1 < s.len and s[i + 1] in {'&', '|', '>'} and
         s[i .. i + 1] in ["&&", "||", ">>", ">&"]:
-      return true
-    if s[i] in Digits and i + 1 < s.len and s[i + 1] == '>' and
-        (i == 0 or s[i - 1] in Whitespace):
       return true
   false
 
@@ -369,7 +388,10 @@ proc unknownCommand*(line: string, r: Resolver): string =
   if rest.len == 0 or rest[0] notin IdentStartChars:
     return ""
   let word = rest[0 ..< skipWhile(rest, IdentChars + {'-'}, 0)]
+  let ident = rest[0 ..< skipWhile(rest, IdentChars, 0)]
   if word in nimKeywords or word in builtins or r.isNimSymbol(word) or r.isProgram(word):
+    return ""
+  if ident != word and r.isNimSymbol(ident): # `a-b` with a Nim `a`
     return ""
   let args = rest[word.len .. ^1]
   if args.len == 0:
@@ -384,22 +406,214 @@ proc unknownCommand*(line: string, r: Resolver): string =
     (a[0] == '-' and a.len > 1 and a[1] in Letters + {'-'})
   if argStart: word else: ""
 
-proc findUnknownCommand*(code: string, r: Resolver): string =
-  ## `unknownCommand` over every line of an input outside triple quoted
-  ## strings.
+# Where in Nim a line is
+
+type LineContext* = object
+  nimOnly*: bool
+    ## Inside a declaration section, an open bracket, a continued expression
+    ## or a `#[ ]#` comment: never a command.
+  locals*: seq[string]
+    ## Names declared in the enclosing blocks of this input (parameters,
+    ## `result`, loop variables, `let` and `var`), which the session's scope
+    ## doesn't know about yet.
+
+const
+  routineWords =
+    ["proc", "func", "method", "iterator", "converter", "template", "macro"]
+  sectionWords = ["type", "const", "let", "var", "using"]
+
+proc endsIn(s: string, chars: set[char]): bool =
+  s.len > 0 and s[^1] in chars
+
+proc cleanName(s: string): string =
+  ## `x*`, `` `x` `` and `x {.pragma.}` all declare `x`.
+  result = s.strip
+  let stop = skipWhile(result, IdentChars + {'`'}, 0)
+  result = result[0 ..< stop].strip(chars = {'`'})
+
+proc paramNames(header: string): seq[string] =
+  ## The parameter names of a routine header, as in `proc f(a, b: int; c = 1)`.
+  result = @[]
+  let open = header.find('(')
+  if open < 0:
+    return
+  var depth = 0
+  var close = open
+  for i in open ..< header.len:
+    if header[i] == '(':
+      inc depth
+    elif header[i] == ')':
+      dec depth
+      if depth == 0:
+        close = i
+        break
+  for group in header[open + 1 ..< close].split(';'):
+    var names = group
+    for sep in [':', '=']:
+      let k = names.find(sep)
+      if k >= 0:
+        names = names[0 ..< k]
+    for name in names.split(','):
+      let n = cleanName(name)
+      if n.len > 0:
+        result.add n
+
+proc declaredNames(stripped: string): seq[string] =
+  ## Names a statement declares: `let a = 1`, `var (x, y) = ...`, `for a, b in`.
+  result = @[]
+  let first = stripped[0 ..< skipWhile(stripped, IdentChars, 0)]
+  var rest = stripped[first.len .. ^1]
+  case first
+  of "let", "var", "const":
+    for sep in ['=', ':']:
+      let k = rest.find(sep)
+      if k >= 0:
+        rest = rest[0 ..< k]
+    for name in rest.strip(chars = Whitespace + {'(', ')'}).split(','):
+      let n = cleanName(name.strip(chars = Whitespace + {'(', ')'}))
+      if n.len > 0:
+        result.add n
+  of "for":
+    let k = rest.find(" in ")
+    if k >= 0:
+      for name in rest[0 ..< k].strip(chars = Whitespace + {'(', ')'}).split(','):
+        let n = cleanName(name.strip(chars = Whitespace + {'(', ')'}))
+        if n.len > 0:
+          result.add n
+  else:
+    discard
+
+proc lineContexts*(
+    code: string, isCommand: proc(line: string, locals: seq[string]): bool = nil
+): seq[LineContext] =
+  ## A `LineContext` for every line of `code`, from its indentation, block
+  ## openers and brackets. A heuristic, not a parser, but it only has to tell
+  ## statements from everything else. `isCommand` keeps a command line that
+  ## ends in `/` or `-` from looking like a continued expression.
+  type Block = object
+    indent: int
+    declaration: bool
+    locals: seq[string]
+
+  result = @[]
+  var stack: seq[Block] = @[Block(indent: -1)]
+  var depth = 0 ## open brackets carried over from earlier lines
+  var continued = false ## the previous line left an expression open
   var inTriple = false
+  var commentDepth = 0 ## inside `#[ ]#`
   for line in code.splitLines:
-    if not inTriple:
-      let word = unknownCommand(line, r)
-      if word.len > 0:
-        return word
+    let stripped = line.strip
+    let indent = line.len - line.strip(trailing = false).len
+    var ctx = LineContext()
+    if inTriple or commentDepth > 0 or depth > 0 or continued or stripped.len == 0 or
+        stripped.startsWith("#"):
+      ctx.nimOnly = true
+    else:
+      while stack.len > 1 and stack[^1].indent >= indent:
+        discard stack.pop
+      for b in stack:
+        if b.declaration:
+          ctx.nimOnly = true
+        ctx.locals.add b.locals
+    result.add ctx
+
+    # What this line changes for the ones after it.
+    let wasNimOnly = ctx.nimOnly and not (stripped.len == 0 or stripped.startsWith("#"))
+    inc commentDepth, line.count("#[")
+    dec commentDepth, line.count("]#")
+    commentDepth = max(commentDepth, 0)
     if line.count("\"\"\"") mod 2 == 1:
       inTriple = not inTriple
+    if inTriple or wasNimOnly and (depth > 0 or continued):
+      # Still inside something; only the bracket count can end it.
+      for (i, d) in unquoted(line):
+        if line.startsComment(i):
+          break
+        if line[i] in {'(', '[', '{'}:
+          inc depth
+        elif line[i] in {')', ']', '}'}:
+          depth = max(depth - 1, 0)
+      continued =
+        depth == 0 and not inTriple and line.strip.endsIn({',', '(', '[', '{'})
+      continue
+    if stripped.len == 0 or stripped.startsWith("#"):
+      continue
+    let first = stripped[0 ..< skipWhile(stripped, IdentChars, 0)]
+    var lineDepth = 0
+    var code = ""
+    for (i, d) in unquoted(line):
+      if line.startsComment(i):
+        break
+      lineDepth = d
+      code.add line[i]
+    depth = max(lineDepth, 0)
+    let tail = code.strip(leading = false)
+    if first in sectionWords and
+        (stripped == first or tail.endsIn({'=', ':'}) or first == "type"):
+      if stripped == first or first == "type":
+        stack.add Block(indent: indent, declaration: true)
+      else:
+        stack[^1].locals.add declaredNames(stripped)
+      continued =
+        depth == 0 and tail.endsIn({'=', ','}) and stripped != first and first != "type"
+    elif first in routineWords and tail.endsWith("="):
+      stack.add Block(indent: indent, locals: paramNames(stripped) & @["result"])
+      continued = false
+    elif depth == 0 and tail.endsWith(":"):
+      stack.add Block(indent: indent, locals: declaredNames(stripped))
+      continued = false
+    else:
+      if first in ["let", "var", "const"]:
+        stack[^1].locals.add declaredNames(stripped)
+      if isCommand != nil and isCommand(line, ctx.locals):
+        depth = 0
+        continued = false
+      else:
+        continued =
+          depth == 0 and tail.len > 0 and
+          tail[^1] in {'=', ',', '+', '-', '*', '/', '&', '|', '<', '>', '.', '('}
+
+proc withLocals(r: Resolver, locals: seq[string]): Resolver =
+  if locals.len == 0:
+    return r
+  Resolver(
+    isNimSymbol: proc(name: string): bool =
+      name in locals or r.isNimSymbol(name),
+    isProgram: r.isProgram,
+  )
+
+proc contextsFor(code: string, r: Resolver): seq[LineContext] =
+  lineContexts(
+    code,
+    proc(line: string, locals: seq[string]): bool =
+      isCommandLine(line, r.withLocals(locals)),
+  )
+
+proc findUnknownCommand*(code: string, r: Resolver): string =
+  ## `unknownCommand` over every statement line of an input.
+  let lines = code.splitLines
+  let contexts = contextsFor(code, r)
+  for i, line in lines:
+    if not contexts[i].nimOnly:
+      let word = unknownCommand(line, r.withLocals(contexts[i].locals))
+      if word.len > 0:
+        return word
   ""
+
+proc skipCharLiteral(s: string, j: int): int =
+  ## The index of the closing quote of the character literal at `j`, or `j`
+  ## if there is none.
+  if j + 2 < s.len and s[j + 1] == '\\':
+    let close = s.find('\'', j + 2)
+    if close > 0: close else: j
+  elif j + 2 < s.len and s[j + 2] == '\'':
+    j + 2
+  else:
+    j
 
 proc extractSplices*(line: string): tuple[line: string, exprs: seq[string]] =
   ## Replaces each `@(expr)` outside single quotes with `splice` and returns
-  ## the expressions in order.
+  ## the expressions in order. `\@(` stays literal.
   result = (line: "", exprs: @[])
   var quote = ' '
   var i = 0
@@ -409,7 +623,7 @@ proc extractSplices*(line: string): tuple[line: string, exprs: seq[string]] =
       if c == '\'':
         quote = ' '
       result.line.add c
-    elif quote == '"' and c == '\\' and i + 1 < line.len:
+    elif c == '\\' and i + 1 < line.len:
       result.line.add c
       inc i
       result.line.add line[i]
@@ -431,6 +645,8 @@ proc extractSplices*(line: string): tuple[line: string, exprs: seq[string]] =
             inString = false
         elif line[j] == '"':
           inString = true
+        elif line[j] == '\'':
+          j = skipCharLiteral(line, j)
         elif line[j] == '(':
           inc depth
         elif line[j] == ')':
@@ -460,8 +676,10 @@ proc translatePart(part: string, r: Resolver): string =
     return part
   let rest = part.strip
   let ident = rest[0 ..< skipWhile(rest, IdentChars, 0)]
+  let word = rest[0 ..< skipWhile(rest, AllChars - Whitespace, 0)]
   let (cmd, exprs) = extractSplices(rest)
-  case ident
+  # `cd/tool` is a program, not the builtin.
+  case (if word == ident: ident else: "")
   of "cd":
     let args = cmd[ident.len .. ^1].strip
     if args.len == 0:
@@ -493,17 +711,15 @@ proc translateLine*(line: string, r: Resolver): string =
   indent & translated.join("; ")
 
 proc translate*(code: string, r: Resolver): string =
-  ## Rewrites every command line in `code`, leaving lines inside triple
-  ## quoted strings alone.
+  ## Rewrites every command line in `code`. Only statement lines can be
+  ## commands, and names declared earlier in the input count as Nim.
+  let contexts = contextsFor(code, r)
   var lines: seq[string] = @[]
-  var inTriple = false
-  for line in code.splitLines:
+  for i, line in code.splitLines.toSeq:
     lines.add(
-      if inTriple:
+      if contexts[i].nimOnly:
         line
       else:
-        translateLine(line, r)
+        translateLine(line, r.withLocals(contexts[i].locals))
     )
-    if line.count("\"\"\"") mod 2 == 1:
-      inTriple = not inTriple
   lines.join("\n")

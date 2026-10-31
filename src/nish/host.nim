@@ -1,10 +1,12 @@
 ## Native implementations of the procs declared in `script/nishapi.nim`.
 
-import std/[os, sets, strutils, tables]
+import std/[os, posix, sets, strutils, tables]
 import compiler/[ast, vm, vmdef]
 import ./[editor, jobs, pipeline]
 
-var lastStatus* = 0 ## of the last command line run through the host
+var captureStatus = 0
+  ## Status of the last `shellCapture`, for `sh` to read back. The status
+  ## scripts see is `nishapi.lastStatus`.
 
 proc toStrings(n: PNode): seq[string] =
   result = @[]
@@ -25,12 +27,10 @@ proc commandsOnPath(prefix: string): seq[string] =
   for dir in getEnv("PATH").split(PathSep):
     for kind, path in walkDir(dir, checkDir = false):
       let name = path.extractFilename
-      if name.startsWith(prefix) and name notin seen:
-        try:
-          if fpUserExec in getFilePermissions(path):
-            seen.incl name
-        except OSError:
-          discard "a broken link, say"
+      # `access` asks what this user may run, group and other bits included.
+      if name.startsWith(prefix) and name notin seen and kind in {pcFile, pcLinkToFile} and
+          access(path.cstring, X_OK) == 0:
+        seen.incl name
   result = @[]
   for name in seen:
     result.add name
@@ -63,25 +63,25 @@ proc registerHostProcs*(
     )
 
   callback "shellRun":
+    var status = 2
     try:
-      lastStatus = execute(a.getString(0), toSplices(a.getNode(1)), false).status
+      status = execute(a.getString(0), toSplices(a.getNode(1)), false).status
     except ShellError as e:
       report e
-      lastStatus = 2
-    a.setResult(BiggestInt lastStatus)
+    a.setResult(BiggestInt status)
 
   callback "shellCapture":
     try:
       let (status, output) = execute(a.getString(0), toSplices(a.getNode(1)), true)
-      lastStatus = status
+      captureStatus = status
       a.setResult(output.strip(leading = false, chars = {'\n'}))
     except ShellError as e:
       report e
-      lastStatus = 2
+      captureStatus = 2
       a.setResult("")
 
   callback "shellLastStatus":
-    a.setResult(BiggestInt lastStatus)
+    a.setResult(BiggestInt captureStatus)
 
   callback "shellWords":
     try:

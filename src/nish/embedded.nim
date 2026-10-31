@@ -4,7 +4,7 @@
 ## them to run anywhere but the machine that built it. They are unpacked into
 ## the user's cache directory the first time a version of nish runs.
 
-import std/[compilesettings, os, staticos]
+import std/[compilesettings, hashes, os, staticos, strutils]
 
 type EmbeddedFile = tuple[path, content: string] ## `path` relative to `lib/`
 
@@ -44,37 +44,46 @@ const
     for path in libFileList:
       files.add (path.relativePath(libSource), staticRead(path))
     files
-  libStamp = block:
-    var bytes = 0
+  libHash = block:
+    var h: Hash = 0
     for f in embeddedLib:
-      bytes += f.content.len
-    NimVersion & " " & $embeddedLib.len & " files " & $bytes & " bytes"
+      h = h !& hash(f.path) !& hash(f.content)
+    toHex(uint64(!$h))
   nishapiSource = staticRead("script/nishapi.nim")
+  nishapiHash = toHex(uint64(hash(nishapiSource)))
 
-proc writeIfChanged(path, content: string) =
-  if not fileExists(path) or readFile(path) != content:
-    createDir(path.parentDir)
-    writeFile(path, content)
+proc rename(source, dest: cstring): cint {.importc, header: "<stdio.h>".}
+
+proc publish(staging, final: string): string =
+  ## Moves a finished `staging` directory to `final` in one `rename`. If
+  ## another nish got there first, its copy is just as good: ours goes.
+  if rename(staging.cstring, final.cstring) != 0:
+    removeDir(staging)
+  final
 
 proc stdlibDir*(): string =
-  ## The unpacked standard library, unpacking it first if this version of
-  ## nish hasn't yet.
-  result = getCacheDir("nish") / "lib-" & NimVersion
-  let stampFile = result / ".nish-stamp"
-  if fileExists(stampFile) and readFile(stampFile) == libStamp:
+  ## The unpacked standard library, unpacking it first if this build of
+  ## nish hasn't yet. The directory is named after a hash of its contents,
+  ## so once it exists it is complete and never changes, even with several
+  ## nish versions running at once.
+  result = getCacheDir("nish") / "lib-" & NimVersion & "-" & libHash
+  if fileExists(result / "system.nim"):
     return
-  # Build next to the final place and move it there, so another nish starting
-  # at the same time never sees a half-written library.
   let staging = result & ".unpacking-" & $getCurrentProcessId()
   removeDir(staging)
   for f in embeddedLib:
     createDir(staging / f.path.parentDir)
     writeFile(staging / f.path, f.content)
-  writeFile(staging / ".nish-stamp", libStamp)
-  removeDir(result)
-  moveDir(staging, result)
+  discard publish(staging, result)
 
 proc nishapiDir*(): string =
-  ## The directory holding `nishapi.nim`, kept current with the binary.
-  result = getCacheDir("nish") / "api"
-  writeIfChanged(result / "nishapi.nim", nishapiSource)
+  ## The directory holding this build's `nishapi.nim`, named after its hash
+  ## for the same reason.
+  result = getCacheDir("nish") / "api-" & nishapiHash
+  if fileExists(result / "nishapi.nim"):
+    return
+  let staging = result & ".unpacking-" & $getCurrentProcessId()
+  removeDir(staging)
+  createDir(staging)
+  writeFile(staging / "nishapi.nim", nishapiSource)
+  discard publish(staging, result)

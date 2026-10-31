@@ -358,6 +358,8 @@ proc loadHistory(e: Editor) =
     for line in readFile(e.historyFile).splitLines:
       if line.len > 0:
         e.history.add decodeEntry(line)
+    if e.history.len > maxHistory:
+      e.history = e.history[^maxHistory .. ^1]
 
 proc addHistory*(e: Editor, entry: string) =
   if entry.strip.len == 0 or (e.history.len > 0 and e.history[^1] == entry):
@@ -394,12 +396,22 @@ proc lineBounds(e: Editor): tuple[start, stop: int] =
     inc stop
   (start, stop)
 
-proc prevRune(e: Editor, pos: int): int =
+proc runeStart(s: string, pos: int): int =
+  ## `pos` moved back to the start of the UTF-8 character it falls in.
+  result = min(pos, s.len)
+  while result > 0 and result < s.len and (ord(s[result]) and 0xC0) == 0x80:
+    dec result
+
+proc prevRune(s: string, pos: int): int =
+  ## Where the character before `pos` in `s` starts.
   result = pos
   if result > 0:
     dec result
-    while result > 0 and (ord(e.text[result]) and 0xC0) == 0x80:
+    while result > 0 and (ord(s[result]) and 0xC0) == 0x80:
       dec result
+
+proc prevRune(e: Editor, pos: int): int =
+  prevRune(e.text, pos)
 
 proc nextRune(e: Editor, pos: int): int =
   if pos >= e.text.len:
@@ -492,13 +504,15 @@ proc completeHere(e: Editor) =
     while n < common.len and n < c.len and common[n] == c[n]:
       inc n
     common.setLen(n)
+  # `é` and `è` share their first byte; don't insert half a character.
+  common.setLen(runeStart(common, common.len))
   if common.len > before.len:
     e.text = e.text[0 ..< start] & common & e.text[e.cursor .. ^1]
     e.cursor = start + common.len
   elif candidates.len > 1:
     var tails: seq[string] = @[]
     for c in candidates:
-      tails.add c[c.rfind(' ', last = before.len - 1) + 1 .. ^1]
+      tails.add c[c.rfind({' ', '\t'}, last = before.len - 1) + 1 .. ^1]
     e.showCandidates(tails)
 
 proc searchHistory(e: Editor) =
@@ -523,11 +537,13 @@ proc searchHistory(e: Editor) =
       query.add key.text
     of "backspace":
       if query.len > 0:
-        query.setLen(e.prevRune(query.len))
+        query.setLen(prevRune(query, query.len))
       upto = e.history.high
     of "ctrl-r":
       if match > 0:
         upto = match - 1
+    of "eof":
+      return # `readInput` reads end of input again and stops
     of "enter", "esc", "ctrl-g", "ctrl-c", "left", "right", "home", "end":
       if match >= 0 and key.name notin ["esc", "ctrl-g", "ctrl-c"]:
         e.text = e.history[match]

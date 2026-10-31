@@ -126,19 +126,73 @@ proc expandOne(w: Word, splices: seq[seq[string]], next: var int): string =
 
 # Processes
 
-type Expanded = object
-  argv: seq[string]
-  redirects: seq[tuple[fd: cint, kind: RedirectKind, target: string]]
+type
+  Expanded = object
+    argv: seq[string]
+    redirects: seq[tuple[fd: cint, kind: RedirectKind, target: string]]
 
-proc writeStderr(msg: string) =
-  discard posix.write(2, msg.cstring, msg.len)
+  ChildRedirect = object
+    fd, source: cint ## `source` is the descriptor to copy for `rdDup`
+    kind: RedirectKind
+    target: string
+    failed: string ## "nish: target: ", written before the reason
 
-proc childRedirect(fd: cint, kind: RedirectKind, target: string) =
-  if kind == rdDup:
-    discard dup2(cint parseInt(target), fd)
+  Prepared = object
+    ## Everything the child needs, made before `fork`: after it, only
+    ## async-signal-safe calls are allowed, so no allocation.
+    argv: cstringArray
+    redirects: seq[ChildRedirect]
+    notFound, failed: string
+
+proc prepare(cmd: Expanded): Prepared =
+  result = Prepared(
+    argv: allocCStringArray(cmd.argv),
+    notFound: "nish: " & cmd.argv[0] & ": command not found\n",
+    failed: "nish: " & cmd.argv[0] & ": ",
+  )
+  for r in cmd.redirects:
+    var c = ChildRedirect(fd: r.fd, kind: r.kind, target: r.target)
+    if r.kind == rdDup:
+      try:
+        c.source = cint parseInt(r.target)
+      except ValueError:
+        fail "bad file descriptor: " & r.target
+      c.failed = "nish: " & r.target & ": bad file descriptor\n"
+    else:
+      c.failed = "nish: " & r.target & ": "
+    result.redirects.add c
+
+proc release(p: var Prepared) =
+  if p.argv != nil:
+    deallocCStringArray(p.argv)
+    p.argv = nil
+
+proc writeRaw(s: cstring) =
+  discard posix.write(2, s, len(s))
+
+proc reason(err: cint): cstring =
+  ## Fixed texts for the usual errors; `strerror` isn't async-signal-safe.
+  if err == ENOENT:
+    "No such file or directory\n"
+  elif err == EACCES:
+    "Permission denied\n"
+  elif err == EISDIR:
+    "Is a directory\n"
+  elif err == ENOTDIR:
+    "Not a directory\n"
+  elif err == ENOEXEC:
+    "Exec format error\n"
+  else:
+    "cannot be used\n"
+
+proc childRedirect(r: ChildRedirect) =
+  if r.kind == rdDup:
+    if dup2(r.source, r.fd) < 0:
+      writeRaw r.failed.cstring
+      exitnow(1)
     return
   let flags: cint =
-    case kind
+    case r.kind
     of rdRead:
       O_RDONLY
     of rdWrite:
@@ -147,19 +201,22 @@ proc childRedirect(fd: cint, kind: RedirectKind, target: string) =
       O_WRONLY or O_CREAT or O_APPEND
     of rdDup:
       0
-  let f = posix.open(target.cstring, flags, 0o644)
+  let f = posix.open(r.target.cstring, flags, 0o644)
   if f < 0:
-    writeStderr "nish: " & target & ": " & $strerror(errno) & "\n"
+    let err = errno
+    writeRaw r.failed.cstring
+    writeRaw reason(err)
     exitnow(1)
-  discard dup2(f, fd)
-  discard close(f)
+  if f != r.fd: # `open` can hand back the very descriptor, if it was closed
+    discard dup2(f, r.fd)
+    discard close(f)
 
 proc spawn(
-    cmd: Expanded,
+    p: Prepared,
     stdinFd, stdoutFd: cint,
     closeFds: seq[cint],
     pgid: var Pid,
-    foreground: bool,
+    foreground, stoppable: bool,
 ): Pid =
   ## `pgid` is the job's process group, 0 until its first process exists.
   result = fork()
@@ -169,20 +226,23 @@ proc spawn(
     parentJobSetup(result, pgid, foreground)
     return
   # The child. Only async-signal-safe calls from here to `execvp`.
-  childJobSetup(pgid, foreground)
+  childJobSetup(pgid, foreground, stoppable)
   if stdinFd >= 0:
     discard dup2(stdinFd, 0)
   if stdoutFd >= 0:
     discard dup2(stdoutFd, 1)
-  for fd in closeFds:
-    discard close(fd)
-  for r in cmd.redirects:
-    childRedirect(r.fd, r.kind, r.target)
-  discard execvp(cmd.argv[0].cstring, allocCStringArray(cmd.argv))
-  let notFound = errno == ENOENT
-  writeStderr "nish: " & cmd.argv[0] & ": " &
-    (if notFound: "command not found" else: $strerror(errno)) & "\n"
-  exitnow(if notFound: 127 else: 126)
+  for k in 0 ..< closeFds.len:
+    discard close(closeFds[k])
+  for k in 0 ..< p.redirects.len:
+    childRedirect(p.redirects[k])
+  discard execvp(p.argv[0], p.argv)
+  let err = errno
+  if err == ENOENT:
+    writeRaw p.notFound.cstring
+    exitnow(127)
+  writeRaw p.failed.cstring
+  writeRaw reason(err)
+  exitnow(126)
 
 proc readAll(fd: cint): string =
   result = ""
@@ -215,31 +275,64 @@ proc runPipeline(
     if e.argv.len == 0:
       fail "missing command"
     cmds.add e
+  let capturing = capture and not background
+  var prepared: seq[Prepared] = @[]
+  for cmd in cmds:
+    prepared.add prepare(cmd)
+  defer:
+    for p in prepared.mitems:
+      p.release()
   var pids: seq[Pid] = @[]
   var pgid: Pid = 0
   var prevRead: cint = -1
   var captureRead: cint = -1
-  for i, cmd in cmds:
-    let last = i == cmds.high
-    var fds: array[0 .. 1, cint] = [cint -1, -1]
-    if not last or (capture and not background):
-      if pipe(fds) != 0:
-        fail "pipe failed: " & $strerror(errno)
-    var closeInChild: seq[cint] = @[]
-    if prevRead >= 0:
-      closeInChild.add prevRead
-    if fds[0] >= 0:
-      closeInChild.add fds[0]
-      closeInChild.add fds[1]
-    pids.add spawn(cmd, prevRead, fds[1], closeInChild, pgid, not background)
-    if prevRead >= 0:
-      discard close(prevRead)
-    if fds[1] >= 0:
-      discard close(fds[1])
-    if last:
-      captureRead = fds[0]
-    else:
-      prevRead = fds[0]
+  var fds: array[0 .. 1, cint] = [cint -1, -1]
+  try:
+    for i in 0 ..< cmds.len:
+      let last = i == cmds.high
+      fds = [cint -1, -1]
+      if not last or capturing:
+        if pipe(fds) != 0:
+          fail "pipe failed: " & $strerror(errno)
+      var closeInChild: seq[cint] = @[]
+      if prevRead >= 0:
+        closeInChild.add prevRead
+      if fds[0] >= 0:
+        closeInChild.add fds[0]
+        closeInChild.add fds[1]
+      # A captured job is never stopped: its output could never arrive, and
+      # the shell would wait for it forever.
+      pids.add spawn(
+        prepared[i],
+        prevRead,
+        fds[1],
+        closeInChild,
+        pgid,
+        not background,
+        stoppable = not capturing,
+      )
+      if prevRead >= 0:
+        discard close(prevRead)
+        prevRead = -1
+      if fds[1] >= 0:
+        discard close(fds[1])
+        fds[1] = -1
+      if last:
+        captureRead = fds[0]
+      else:
+        prevRead = fds[0]
+      fds[0] = -1
+  except ShellError:
+    # A later stage failed to start: don't leave the earlier ones behind.
+    for fd in [prevRead, fds[0], fds[1], captureRead]:
+      if fd >= 0:
+        discard close(fd)
+    for pid in pids:
+      discard kill(pid, SIGKILL)
+      var status: cint = 0
+      discard waitpid(pid, status, 0)
+    takeTerminalBack()
+    raise
   var texts: seq[string] = @[]
   for cmd in cmds:
     texts.add cmd.argv.join(" ")

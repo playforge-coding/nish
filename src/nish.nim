@@ -1,11 +1,12 @@
 ## nish: a terminal shell whose language is NimScript.
 
 import std/[monotimes, os, posix, strutils, times]
-import nish/[commands, editor, host, input, jobs, session]
+import nish/[commands, editor, input, jobs, session]
 
 const usage = """
 Usage:
-  nish                 start an interactive shell
+  nish                 start an interactive shell, or run standard input
+                       when it isn't a terminal
   nish <script>        run a script
   nish -c <code>       run code
 Options:
@@ -39,15 +40,8 @@ proc newEditor(s: Session): Editor =
   result.userKey = proc(key: string): bool =
     s.hookBool("nishKeyPressed", strNode(key))
 
-proc stdinReader(): LineReader =
-  ## Lines from a pipe or file on standard input, with no editing.
-  result = proc(continuation: bool, line: var string): bool =
-    stdin.readLine(line)
-
 proc interact(s: Session) =
-  let interactive = isatty(0) != 0
-  let editor = if interactive: s.newEditor else: nil
-  let reader = stdinReader()
+  let editor = s.newEditor
   var chunk = ""
   var dir = currentDir("")
   while true:
@@ -56,17 +50,14 @@ proc interact(s: Session) =
     if now != dir:
       dir = now
       s.runHook("nishDirChanged", strNode(now))
-    if interactive:
-      let prompt = s.hookString("nishPrompt", "nish> ")
-      let continuation = s.hookString("nishContinuationPrompt", "  ... ")
-      if not editor.readInput(prompt, continuation, chunk):
-        break
-      editor.addHistory(chunk)
-    elif not readChunk(reader, s.isCommand, chunk):
+    let prompt = s.hookString("nishPrompt", "nish> ")
+    let continuation = s.hookString("nishContinuationPrompt", "  ... ")
+    if not editor.readInput(prompt, continuation, chunk):
       break
+    editor.addHistory(chunk)
     s.runHook("nishPreCommand", strNode(chunk))
     discard s.eval(chunk)
-    s.runHook("nishCommandDone", strNode(chunk), intNode(lastStatus))
+    s.runHook("nishCommandDone", strNode(chunk), intNode(s.lastStatus))
 
 proc runScript(s: Session, lines: seq[string], stopOnError: bool): bool =
   ## Evaluates a script one top-level statement at a time, so commands see
@@ -105,6 +96,9 @@ proc main() =
       script = args[i]
       interactive = false
     inc i
+  let fromStdin = interactive and isatty(0) == 0
+  if fromStdin:
+    interactive = false # `cat script.nims | nish` runs it like a script
 
   let started = getMonoTime()
   let s = newSession()
@@ -120,15 +114,18 @@ proc main() =
       s.sourceName = ""
     s.interact()
   else:
-    s.sourceName = if haveCode: "" else: script
+    s.sourceName = if haveCode or fromStdin: "" else: script
     var lines =
       if haveCode:
         code.splitLines
+      elif fromStdin:
+        stdin.readAll.splitLines
       else:
         readFile(script).splitLines
     if lines.len > 0 and lines[0].startsWith("#!"):
       lines[0] = ""
-    if not s.runScript(lines, stopOnError = true):
-      quit(QuitFailure)
+    discard s.runScript(lines, stopOnError = true)
+    # Like other shells: the status of the last command, or of the failure.
+    quit(s.lastStatus)
 
 main()

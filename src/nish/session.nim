@@ -23,9 +23,8 @@ type Session* = ref object
   apiDir: string ## where `nishapi.nim` was unpacked
   sourceName*: string ## shown in messages instead of `stdin`; "" at the prompt
   inputLines: int ## of the input being evaluated, for message positions
-  onMessage*: proc(line: string) ## where compiler messages go; stderr by default
+  onMessage*: proc(line: string) ## where compiler errors go; stderr by default
   errorShown: bool ## an error was already shown for this input
-  suppressing: bool ## the current message is a follow-up error, dropped
 
 proc errorCount(s: Session): int =
   s.graph.config.errorCounter
@@ -98,55 +97,46 @@ proc resolver*(s: Session): Resolver =
         aliases.hasKey(name) or findExe(name).len > 0,
   )
 
-proc eval*(s: Session, input: string, line = 1): bool =
-  ## Evaluates shell input: Nim with command lines mixed in.
-  let r = s.resolver
-  s.inputLines = input.countLines
-  s.errorShown = false
-  s.suppressing = false
-  let missing = findUnknownCommand(input, r)
-  if missing.len > 0:
-    stderr.writeLine "nish: ", missing, ": command not found"
-    lastStatus = 127
-    discard s.evalNim("lastStatus = 127")
-    return false
-  s.evalNim(translate(input, r), line)
-
-proc formatMessage(s: Session, msg: string): string =
-  ## Compiler messages start with `stdin(line, col) `. At the prompt that
-  ## says nothing useful, so it goes, or becomes `line N: ` for an input of
-  ## several lines; in a script it names the script.
-  if not msg.startsWith("stdin("):
-    return msg
-  let close = msg.find(") ")
-  if close < 0:
-    return msg
-  let position = msg[6 ..< close]
-  let rest = msg[close + 2 .. ^1]
-  if s.sourceName.len > 0:
-    s.sourceName & "(" & position & ") " & rest
-  elif s.inputLines > 1:
-    "line " & position[0 ..< position.find(',')] & ": " & rest
-  else:
-    rest
-
-proc deliver(s: Session, msg: string) =
-  ## Passes a compiler message line on, except follow-up errors. The compiler
-  ## goes on after an error so the session survives it, and reports every
-  ## consequence of the first mistake too; only the first error and its
-  ## detail lines are shown.
+proc report(s: Session, info: TLineInfo, msg: string, severity: Severity) =
+  ## Shows a compiler error. Only the first of an input: the compiler goes on
+  ## after an error so the session survives, and reports every consequence
+  ## of the first mistake too. The position says nothing useful at the
+  ## prompt, so it goes there, or becomes `line N:` for an input of several
+  ## lines; a script shows its name, and the stdlib's own files are left out.
+  let conf = s.graph.config
   # While the compiler tries overload candidates it turns its outputs off
-  # but still calls the hook with the errors it runs into there.
-  if s.graph.config.m.errorOutputs == {}:
+  # but still reports the errors it runs into there.
+  if severity != Severity.Error or conf.m.errorOutputs == {} or s.errorShown:
     return
-  if msg.startsWith("stdin("):
-    if " Error: " in msg:
-      s.suppressing = s.errorShown
-      s.errorShown = true
-    else:
-      s.suppressing = false
-  if not s.suppressing:
-    s.onMessage(s.formatMessage(msg))
+  s.errorShown = true
+  var location = ""
+  if info.fileIndex == s.module.fileIdx:
+    if s.sourceName.len > 0:
+      location = s.sourceName & "(" & $info.line & ", " & $(info.col + 1) & ") "
+    elif s.inputLines > 1 or info.line > 1:
+      location = "line " & $info.line & ": "
+  elif info != unknownLineInfo and
+      not toFullPath(conf, info.fileIndex).startsWith(conf.libpath.string):
+    location = toFileLineCol(conf, info) & " "
+  # `doAssert` and friends put their own `stdin(line, col)` in the text.
+  var msg = msg
+  let k = msg.find("stdin(")
+  if k >= 0:
+    let close = msg.find(") ", k)
+    if close > k:
+      msg =
+        if s.sourceName.len > 0:
+          msg[0 ..< k] & s.sourceName & msg[k + 5 .. ^1]
+        else:
+          msg[0 ..< k] & msg[close + 2 .. ^1]
+  let lines: seq[string] = ("Error: " & msg).splitLines
+  for i, line in lines:
+    s.onMessage(
+      if i == 0:
+        location & line
+      else:
+        line
+    )
 
 # Calling into the VM
 
@@ -164,7 +154,6 @@ proc callHook*(s: Session, name: string, args: varargs[PNode]): PNode =
   if sym == nil:
     return nil
   s.errorShown = false
-  s.suppressing = false
   let before = s.errorCount
   let mark = s.vm.mem.stackMark
   try:
@@ -217,6 +206,32 @@ proc symbolNames*(s: Session, prefix: string): seq[string] =
   for name in seen:
     result.add name
 
+proc lastStatus*(s: Session): int =
+  ## `lastStatus` as scripts see it.
+  let n = s.callHook("nishLastStatus")
+  if n != nil and n.kind == nkIntLit:
+    int(n.intVal)
+  else:
+    0
+
+proc setLastStatus*(s: Session, status: int) =
+  s.runHook("nishSetLastStatus", intNode(status))
+
+proc eval*(s: Session, input: string, line = 1): bool =
+  ## Evaluates shell input: Nim with command lines mixed in. An input that
+  ## fails sets `lastStatus` to 1, or 127 for a command that isn't there.
+  let r = s.resolver
+  s.inputLines = input.countLines
+  s.errorShown = false
+  let missing = findUnknownCommand(input, r)
+  if missing.len > 0:
+    stderr.writeLine "nish: ", missing, ": command not found"
+    s.setLastStatus(127)
+    return false
+  result = s.evalNim(translate(input, r), line)
+  if not result:
+    s.setLastStatus(1)
+
 proc pluginDirs(): seq[string] =
   ## Plugins are Nim modules under these roots, directly or one directory
   ## down, so a cloned repository works as it is.
@@ -258,10 +273,14 @@ proc newSession*(): Session =
   let session = Session(graph: graph, module: module, apiDir: api)
   session.onMessage = proc(line: string) =
     stderr.writeLine line
-  conf.writelnHook = proc(output: string) {.gcsafe.} =
+  # Errors come through the hook and nish prints them itself. The compiler's
+  # own printing to stderr is off; `echo` from scripts still reaches stdout.
+  conf.m.errorOutputs = {eStdOut}
+  conf.structuredErrorHook = proc(
+      conf: ConfigRef, info: TLineInfo, msg: string, severity: Severity
+  ) {.gcsafe.} =
     {.cast(gcsafe).}: # single-threaded; `onMessage` is a plain closure
-      for line in output.strip(leading = false, chars = {'\n'}).splitLines:
-        session.deliver(line)
+      session.report(info, msg, severity)
   registerHostProcs(
     vm,
     getPackageName(conf, api / "nishapi.nim"),

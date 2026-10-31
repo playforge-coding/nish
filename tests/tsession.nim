@@ -45,6 +45,20 @@ test "detail lines of the first error are kept":
     "Error: type mismatch: got 'string' for '\"text\"' but expected 'int'"
   check messages.len == 1
 
+test "lastStatus after a failed input":
+  check s.eval("run(\"true\")")
+  check not s.eval("nope3()")
+  check s.lastStatus == 1
+  check not s.eval("nosuchprogram")
+  check s.lastStatus == 127
+  check s.eval("run(\"test 1 = 2\")")
+  check s.lastStatus == 1
+
+test "echo is not an error message":
+  messages = @[]
+  check s.eval("echo \"to stdout\"")
+  check messages.len == 0
+
 test "command not found":
   messages = @[]
   check not s.eval("nosuchprogram -v")
@@ -85,7 +99,8 @@ test "splices":
     "doAssert words(\"x \\0 \\0 p\\0q\", xs, 3, xs[0]) == @[\"x\", \"a\", \"b\", \"3\", \"paq\"]"
   )
   check s.eval("doAssert words(\"\\0\", newSeq[string]()).len == 0")
-  check s.eval("doAssert sh(\"printf %s \\0\") == \"\"") # too few values
+  check s.eval("doAssert sh(\"printf %s \\0\") == \"\" and lastStatus == 2")
+    # too few values
 
 test "lines that are commands despite their first word":
   check s.eval("true && printf and > @(tmp)/and.txt")

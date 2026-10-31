@@ -41,13 +41,14 @@ proc ignore(sig: cint) {.noconv.} =
   discard
 
 proc enableJobControl*() =
-  ## Call once when the shell is interactive.
+  ## Call once when the shell reads from a terminal. Without one, Ctrl-C
+  ## must keep stopping the shell itself, as it does any script.
+  if isatty(ttyFd) == 0:
+    return
   # A handler, unlike `SIG_IGN`, resets to the default when a child runs
   # `exec`, so programs the shell starts still die from Ctrl-C.
   signal(SIGINT, ignore)
   signal(SIGQUIT, ignore)
-  if isatty(ttyFd) == 0:
-    return
   # These must really be ignored: `tcsetpgrp` from outside the foreground
   # group fails with EINTR when SIGTTOU merely has a handler.
   for sig in terminalSignals:
@@ -58,20 +59,23 @@ proc enableJobControl*() =
   shellPgid = getpgrp()
   discard tcsetpgrp(ttyFd, shellPgid)
 
-proc childJobSetup*(pgid: Pid, foreground: bool) =
+proc childJobSetup*(pgid: Pid, foreground, stoppable: bool) =
   ## Between `fork` and `exec` in the child. Only async-signal-safe calls.
-  if not jobControl:
-    return
-  let group =
-    if pgid == 0:
-      getpid()
-    else:
-      pgid
-  discard setpgid(0, group)
-  if foreground:
-    discard tcsetpgrp(ttyFd, group)
-  for sig in jobSignals:
-    signal(sig, SIG_DFL)
+  ## A job that isn't `stoppable` ignores Ctrl-Z; an ignored signal stays
+  ## ignored across `exec`.
+  if jobControl:
+    let group =
+      if pgid == 0:
+        getpid()
+      else:
+        pgid
+    discard setpgid(0, group)
+    if foreground:
+      discard tcsetpgrp(ttyFd, group)
+    for sig in jobSignals:
+      signal(sig, SIG_DFL)
+  if not stoppable:
+    signal(SIGTSTP, SIG_IGN)
 
 proc parentJobSetup*(pid: Pid, pgid: var Pid, foreground: bool) =
   ## After `fork` in the parent. Both sides set the group and the terminal,
@@ -145,7 +149,7 @@ proc report(job: Job) =
   stderr.writeLine describe(job)
   job.stateReported = job.state
 
-proc takeTerminalBack() =
+proc takeTerminalBack*() =
   if jobControl:
     discard tcsetpgrp(ttyFd, shellPgid)
 
@@ -172,7 +176,9 @@ proc waitForeground*(job: Job): int =
     job.forget()
 
 proc startBackground*(job: Job) =
-  stderr.writeLine "[", job.id, "] ", job.pgid
+  ## Announces the job with its first process, which leads its group when
+  ## there is job control. Without it `pgid` is 0.
+  stderr.writeLine "[", job.id, "] ", job.left[0]
 
 proc notify*() =
   ## Reports background jobs that finished or stopped since the last prompt.
@@ -210,13 +216,13 @@ proc find(id: int): Job =
 
 proc continueJob(job: Job) =
   if job.state == jsStopped:
-    discard kill(
-      if jobControl:
-        -job.pgid
-      else:
-        job.pgid,
-      SIGCONT,
-    )
+    if jobControl:
+      discard kill(-job.pgid, SIGCONT)
+    else:
+      # No group of its own: `pgid` is 0, and signalling group 0 would wake
+      # every stopped process in the shell's group.
+      for pid in job.left:
+        discard kill(pid, SIGCONT)
   job.state = jsRunning
   job.stateReported = jsRunning
 

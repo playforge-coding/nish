@@ -7,7 +7,9 @@
 
 import std/[algorithm, strutils]
 
-var lastStatus* = 0 ## Exit status of the last command `run` or `sh` finished with.
+var lastStatus* = 0
+  ## Exit status of the last command, or 1 after an input that failed to
+  ## compile or raised, and 127 after a command that wasn't found.
 
 proc toArgs*(s: string): seq[string] =
   @[s]
@@ -157,18 +159,22 @@ proc defaultCompleter(line, word: string): seq[string] =
     for b in builtins:
       if b.startsWith(word):
         result.add b
+  elif word == "~" or word.startsWith("~/"):
+    # Look up the real path, but keep the `~` the user typed.
+    let home = getEnv("HOME")
+    result = @[]
+    for path in shellFiles(home & word[1 .. ^1]):
+      result.add "~" & path[home.len .. ^1]
   else:
     result = shellFiles(word)
 
 var
-  prompt*: proc(): string = defaultPrompt
-    ## Returns the prompt. Plain text only for now: the line editor counts
-    ## every character, so color codes misplace the cursor.
+  prompt*: proc(): string = defaultPrompt ## Returns the prompt. Color codes are fine.
   continuationPrompt*: proc(): string = defaultContinuationPrompt
   onPreCommand*: seq[proc(line: string)] =
-    @[] ## Run with each line before it is evaluated.
+    @[] ## Run with each input at the prompt before it is evaluated.
   onCommandDone*: seq[proc(line: string, status: int)] =
-    @[] ## Run after each line with the status of the last command it ran.
+    @[] ## Run after each input at the prompt with `lastStatus`.
   onDirChange*: seq[proc(dir: string)] =
     @[] ## Run before a prompt when the current directory changed.
   completers*: seq[Completer] = @[Completer(defaultCompleter)]
@@ -189,6 +195,12 @@ proc bindKey*(key: string, action: proc()) =
   keyBindings.add (key, action)
 
 # Entry points nish calls
+
+proc nishLastStatus*(): int =
+  lastStatus
+
+proc nishSetLastStatus*(status: int) =
+  lastStatus = status
 
 proc nishKeyPressed*(key: string): bool =
   for binding in keyBindings:
@@ -218,7 +230,7 @@ proc nishDirChanged*(dir: string) =
 proc nishComplete*(line: string): seq[string] =
   ## Whole-line replacements for `line`, which is what the line editor
   ## wants back.
-  let start = line.rfind(' ') + 1
+  let start = line.rfind({' ', '\t'}) + 1
   let word = line[start .. ^1]
   result = @[]
   for completer in completers:

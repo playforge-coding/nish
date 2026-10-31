@@ -18,8 +18,25 @@ type
 
 const
   continuationChars = {
-    '+', '-', '*', '/', '\\', '<', '>', '!', '?', '^', '|', '%', '&', '$', '@', '~',
-    ',', '#', ':', '=',
+    '+',
+    '-',
+    '*',
+    '/',
+    '\\',
+    '<',
+    '>',
+    '!',
+    '?',
+    '^',
+    '|',
+    '%',
+    '&',
+    '$',
+    '@',
+    '~',
+    ',',
+    ':',
+    '=', # not '#': comments are stripped first, and `]#` ends one
   }
   continuationWords = [
     "let", "var", "const", "type", "object", "tuple", "div", "mod", "shl", "shr", "in",
@@ -34,9 +51,27 @@ proc endsWithWord(line, word: string): bool =
     line[^(word.len + 1)] notin IdentChars
   )
 
+proc withoutComment(line: string): string =
+  ## `line` up to a `#` that starts a comment, outside quotes.
+  var quote = ' '
+  var i = 0
+  while i < line.len:
+    let c = line[i]
+    if quote != ' ':
+      if c == '\\':
+        inc i
+      elif c == quote:
+        quote = ' '
+    elif c in {'"', '\''}:
+      quote = c
+    elif c == '#' and (i == 0 or line[i - 1] in Whitespace):
+      return line[0 ..< i]
+    inc i
+  line
+
 proc endsOpen(line: string): bool =
   ## The statement on this line goes on to the next one.
-  let line = line.strip(leading = false)
+  let line = line.withoutComment.strip(leading = false)
   if line.len == 0:
     return false
   if line[^1] in continuationChars:
@@ -45,6 +80,10 @@ proc endsOpen(line: string): bool =
     if line.endsWithWord(word):
       return true
   false
+
+proc opens(line: string): int =
+  ## How many `#[ ]#` comments the line leaves open (negative: closes).
+  line.count("#[") - line.count("]#")
 
 proc continues(line: string, inTriple: bool): bool =
   ## At the prompt, an indented line also keeps the block open. A line of
@@ -64,12 +103,14 @@ proc readChunk*(
   chunk = ""
   var line = ""
   var triples = 0
+  var comments = 0 ## open `#[ ]#` comments, which keep going like strings
   while readLine(chunk.len > 0, line):
     if chunk.len > 0:
       chunk.add '\n'
     chunk.add line
     triples += line.count("\"\"\"")
-    let inTriple = triples mod 2 == 1
+    comments = max(comments + line.opens, 0)
+    let inTriple = triples mod 2 == 1 or comments > 0
     if isTopLevelCommand(line, inTriple, isCommand) or not continues(line, inTriple):
       return true
   chunk.len > 0
@@ -79,7 +120,7 @@ proc needsMoreInput*(text: string, isCommand: proc(line: string): bool): bool =
   ## add a line rather than accept it. The last line decides, as in
   ## `readChunk`.
   let lines = text.split('\n')
-  let inTriple = text.count("\"\"\"") mod 2 == 1
+  let inTriple = text.count("\"\"\"") mod 2 == 1 or text.opens > 0
   if lines.len == 1 and isTopLevelCommand(lines[0], inTriple, isCommand):
     return false
   continues(lines[^1], inTriple)
@@ -99,6 +140,7 @@ proc splitChunks*(
   var current = Chunk(line: 1)
   var lineCount = 0
   var triples = 0
+  var comments = 0 ## open `#[ ]#` comments, which keep going like strings
   for i, line in lines:
     if lineCount == 0:
       if line.strip.len == 0:
@@ -109,7 +151,8 @@ proc splitChunks*(
     current.code.add line
     inc lineCount
     triples += line.count("\"\"\"")
-    let inTriple = triples mod 2 == 1
+    comments = max(comments + line.opens, 0)
+    let inTriple = triples mod 2 == 1 or comments > 0
     var next = i + 1
     while next < lines.len and lines[next].strip.len == 0:
       inc next

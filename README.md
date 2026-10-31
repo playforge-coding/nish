@@ -23,7 +23,7 @@ nish> cd /tmp
 - Command lines have shell syntax: pipes, `>`, `>>`, `<`, `2>&1`, `&&`, `||` and `;`, with globs, `~` and `$VAR` expanded in unquoted words.
 - `@(d)` puts the value of the Nim expression `d` into a command. A sequence becomes one argument per element.
 - `sh"..."` runs a command line and returns its output as a string; `lastStatus` holds the exit status of the last command.
-- `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim. Three things override that: a line containing `&&`, `||`, `>>` or `2>` is always a command, since those are never Nim; a leading `!` makes the whole line a command (`!echo x | wc -l`); and `run"echo x | wc -l"` is plain Nim.
+- `echo` is Nim's `echo`, because Nim wins whenever a name means something in Nim. Three things override that: a line containing `&&`, `||`, `>>` or `>&` is always a command, since those are never Nim; a leading `!` makes the whole line a command (`!echo x | wc -l`); and `run"echo x | wc -l"` is plain Nim.
 - `;` separates statements, each of which can be Nim or a command: `ls; echo "done"`.
 - Commands work anywhere a statement does, including inside loops and procs.
 - Job control works as you'd expect: `cmd &` runs in the background, Ctrl-Z stops the foreground job, and `jobs`, `fg` and `bg` manage them.
@@ -34,11 +34,14 @@ Scripts work the same way:
 ```sh
 nish script.nims
 nish -c 'for i in 1..3: echo i'
+cat script.nims | nish
 ```
+
+A script stops at its first error, and nish exits with the status of the last command, as other shells do.
 
 ## Customizing
 
-nish runs `~/.config/nish/init.nims` when it starts. It's NimScript like everything else, and it configures the shell by setting hooks:
+nish runs `~/.config/nish/init.nims` when an interactive session starts (not for scripts, `-c` or piped input). It's NimScript like everything else, and it configures the shell by setting hooks:
 
 ```nim
 import std/strutils
@@ -57,7 +60,7 @@ completers.add proc(line, word: string): seq[string] =
   if line.startsWith("git "): @["status", "commit", "push"] else: @[]
 ```
 
-The hooks are `prompt`, `continuationPrompt`, `onPreCommand`, `onCommandDone`, `onDirChange` and `completers`. A plugin is a Nim module in `~/.config/nish/plugins/` (directly or one directory down, so a cloned repository works as it is) that you `import` from `init.nims`. Tab completes programs, Nim symbols in scope, builtins and file names, plus whatever the completers add. History is kept in the nish data directory.
+The hooks are `prompt`, `continuationPrompt`, `onPreCommand`, `onCommandDone`, `onDirChange` and `completers`; they run for input at the prompt, not for scripts. A plugin is a Nim module in `~/.config/nish/plugins/` (directly or one directory down, so a cloned repository works as it is) that you `import` from `init.nims`. Tab completes programs, Nim symbols in scope, builtins and file names, plus whatever the completers add. History is kept in the nish data directory.
 
 Prompts can use colors. Keys can be bound to Nim procs, which edit the input through `editorText`, `editorCursor`, `editorSetText` and `editorInsert`:
 
