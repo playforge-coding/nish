@@ -1,17 +1,15 @@
 name: Docs
 
-# Checks that the docs build without warnings. Runs only when the docs change.
-# Deploying is the Pages workflow's job.
+# Checks that the docs build without warnings, on pull requests that change
+# them. On main, the Pages workflow runs the same strict build before it
+# deploys, so this one doesn't run there too.
 
 on:
-  push:
-    branches: [main]
-    paths: &paths
+  pull_request:
+    paths:
       - "docs/**"
       - "zensical.toml"
       - ".github/workflows/docs.yml"
-  pull_request:
-    paths: *paths
   workflow_dispatch:
 
 permissions:

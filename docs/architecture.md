@@ -40,7 +40,7 @@ In the other direction, nish calls entry points in `nishapi` (`nishPrompt`, `nis
 
 ## The line editor
 
-`editor.nim` puts the terminal into raw mode while it reads an input, with `TCSADRAIN` so typed-ahead and pasted input is never thrown away, and turns on bracketed paste so a pasted block arrives as one piece. It keeps the whole input, which may span lines, and redraws it after every key, tracking which row the cursor is on so it can get back to the top even when lines wrap. Prompts may contain color codes; they don't count toward the width. Enter accepts the input once it's complete by the same rules the script splitter uses.
+`editor.nim` puts the terminal into raw mode while it reads an input, with `TCSADRAIN` so typed-ahead and pasted input is never thrown away, and turns on bracketed paste so a pasted block arrives as one piece. It keeps the whole input, which may span lines, and redraws it after every key, tracking which row the cursor is on so it can get back to the top even when lines wrap. Prompts may contain color codes; they don't count toward the width. Enter accepts the input once it's complete by the prompt's rules (`input.needsMoreInput`): a line that opens a block or ends in an operator asks for more, and a blank line ends a block. Scripts are split differently, by looking ahead to where the next top-level statement starts.
 
 ## The embedded standard library
 

@@ -65,6 +65,9 @@ These are variables you set or add to, usually in `init.nims`. See [Customizing]
 `proc bindKey(key: string, action: proc())`
 :   Runs `action` when `key` is pressed at the prompt, instead of the editor's own action. Binding a key again replaces the earlier binding. See [Key bindings](customizing.md#key-bindings) for key names.
 
+`var keyBindings: seq[tuple[key: string, action: proc()]]`
+:   The bindings `bindKey` has made, in order. Usually you'd go through `bindKey`, but a plugin can read this to see what's bound, or remove an entry to unbind a key.
+
 `proc editorText(): string`
 :   The input being edited.
 

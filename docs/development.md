@@ -40,13 +40,14 @@ To see a first run, delete the cache directory (`~/Library/Caches/nish` on macOS
 
 ## Documentation
 
-The docs are a [Zensical](https://zensical.org) site: `zensical.toml` at the root and the pages in `docs/`.
+The docs are a [Zensical](https://zensical.org) site: `zensical.toml` at the root and the pages in `docs/`. Zensical is a Python tool; install the version the workflows pin (`ZENSICAL_VERSION` in `.github/workflows/docs.yml`) with [uv](https://docs.astral.sh/uv/):
 
 ```sh
-zensical serve    # live preview at http://localhost:8000
-zensical build    # writes site/, which git ignores
+uv tool install zensical==0.0.72
+zensical serve           # live preview at http://localhost:8000
+zensical build --strict  # writes site/, which git ignores
 ```
 
 Update the docs in the same change as the code they describe. On the [roadmap](roadmap.md), check finished items off where they are instead of moving them to another section.
 
-A pull request that touches the docs runs a strict build, and every push to `main` publishes the site to GitHub Pages.
+A pull request that touches the docs runs a strict build. A push to `main` that changes `docs/`, `zensical.toml` or the Pages workflow publishes the site to GitHub Pages; other pushes leave it alone.

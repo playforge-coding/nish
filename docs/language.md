@@ -10,7 +10,7 @@ A line is a command when its first word:
 2. is not a Nim name in scope (a proc, variable, type or constant, from your session or an imported module), and
 3. names a program on your `PATH`, an [alias](customizing.md#aliases), or a path to an executable like `./build.sh`.
 
-A Nim name only counts when it is written exactly as it was declared. Nim itself would accept `mkdir` for NimScript's `mkDir`, but at a shell prompt `mkdir` means the program, so that's what nish runs. Spelled `mkDir`, it's the Nim proc.
+Nim matches names style insensitively (`sayHi` calls a proc declared as `say_hi`), and nish does too, with one exception: when a name is also a program, only the exact declared spelling makes it Nim. Nim itself would accept `mkdir` for NimScript's `mkDir`, but at a shell prompt `mkdir` means the program, so that's what nish runs. Spelled `mkDir`, it's the Nim proc.
 
 So Nim wins whenever a name means something in Nim:
 
@@ -24,7 +24,7 @@ So Nim wins whenever a name means something in Nim:
 
 Three things override the rule:
 
-- **Shell-only operators.** A line containing `&&`, `||`, `>>` or `>&` outside quotes is a command, whatever its first word is, because those are never Nim. `false || printf "fallback\n"` runs both programs.
+- **Shell-only operators.** A line containing `&&`, `||`, `>>` or `>&` outside quotes and comments is a command, whatever its first word is, because those are never Nim. `false || printf "fallback\n"` runs both programs.
 - **A leading `!`.** It makes the whole line a command: `!echo x | wc -l`. Use it for lines whose first word is a Nim name, when the line only uses operators that Nim has too, like `|`, `>` and `<`.
 - **Plain Nim.** `run"echo x | wc -l"` is an ordinary Nim call, so it works anywhere.
 
